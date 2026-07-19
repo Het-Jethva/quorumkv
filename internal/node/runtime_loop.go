@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"math/rand"
 	"time"
@@ -30,6 +31,18 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 
 	n.publishRaftState(runtime.core.State())
 	sessions := newSessionMachine(n.config.ActiveSessionLimit)
+	recovery, err := runtime.step(raft.RecoverCommitted{})
+	if err != nil {
+		return err
+	}
+	for _, action := range recovery {
+		apply, ok := action.(raft.ApplyEntry)
+		if !ok {
+			return fmt.Errorf("recover committed state: unexpected Raft action %T", action)
+		}
+		sessions.apply(apply.Entry)
+	}
+	n.publishRaftState(runtime.core.State())
 	type pendingProposal struct {
 		result chan proposalResult
 		ctx    context.Context

@@ -31,15 +31,19 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 		}
 		logEntries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: raft.EntryType(entry.Type), SessionID: raft.SessionID(entry.SessionID), Sequence: entry.Sequence, Key: entry.Key, Value: append([]byte(nil), entry.Value...)}
 	}
-	core := raft.NewNodeWithLog(raft.NodeID(cfg.Node.ID), peers, raft.HardState{
-		Term:     recovered.HardState.Term,
-		VotedFor: raft.NodeID(recovered.HardState.VotedFor),
-	}, logEntries)
+	core := raft.NewNodeFromRecoveredState(raft.NodeID(cfg.Node.ID), peers, raft.RecoveredState{
+		HardState: raft.HardState{
+			Term:     recovered.HardState.Term,
+			VotedFor: raft.NodeID(recovered.HardState.VotedFor),
+		},
+		Log:         logEntries,
+		CommitIndex: recovered.CommitIndex,
+	})
 	return &raftRuntime{core: core, wal: store}, nil
 }
 
-// step executes hard-state persistence inline. The completion event is not
-// delivered to Raft until SaveHardState has appended and synced the record.
+// step executes durability actions synchronously. A completion event is not
+// delivered to Raft until the corresponding WAL records have been synced.
 func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 	pending := r.core.Step(event)
 	var emitted []raft.Action
@@ -58,6 +62,11 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 				PersistenceID: persist.PersistenceID,
 			})...)
 		case raft.PersistLogEntries:
+			if persist.TruncateFrom != 0 {
+				if err := r.wal.TruncateLog(persist.TruncateFrom); err != nil {
+					return nil, fmt.Errorf("persist Raft log truncation: %w", err)
+				}
+			}
 			entries := make([]wal.LogEntry, len(persist.Entries))
 			for index, entry := range persist.Entries {
 				entries[index] = wal.LogEntry{Index: entry.Index, Term: entry.Term, Type: wal.EntryType(entry.Type), SessionID: [16]byte(entry.SessionID), Sequence: entry.Sequence, Key: entry.Key, Value: append([]byte(nil), entry.Value...)}
@@ -66,6 +75,13 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 				return nil, fmt.Errorf("persist Raft log entries: %w", err)
 			}
 			pending = append(pending, r.core.Step(raft.LogEntriesPersisted{
+				PersistenceID: persist.PersistenceID,
+			})...)
+		case raft.PersistCommitIndex:
+			if err := r.wal.SaveCommitIndex(persist.CommitIndex); err != nil {
+				return nil, fmt.Errorf("persist Raft commit index: %w", err)
+			}
+			pending = append(pending, r.core.Step(raft.CommitIndexPersisted{
 				PersistenceID: persist.PersistenceID,
 			})...)
 		default:

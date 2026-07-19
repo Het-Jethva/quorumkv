@@ -91,6 +91,51 @@ func TestWALSyncsAndValidatesLogEntryOrder(t *testing.T) {
 	}
 }
 
+func TestWALRecoversCommittedPrefixAcrossTruncationAndReplacement(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 1},
+	}); err != nil {
+		t.Fatalf("save initial log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.TruncateLog(2); err == nil || !strings.Contains(err.Error(), "committed index 2") {
+		t.Fatalf("truncate committed history error = %v, want rejection", err)
+	}
+	if err := store.TruncateLog(3); err != nil {
+		t.Fatalf("truncate uncommitted suffix: %v", err)
+	}
+	replacement := LogEntry{Index: 3, Term: 2}
+	if err := store.SaveLogEntries([]LogEntry{replacement}); err != nil {
+		t.Fatalf("save replacement entry: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.CommitIndex != 2 {
+		t.Fatalf("recovered commit index = %d, want 2", recovered.CommitIndex)
+	}
+	wantLog := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, replacement}
+	if !reflect.DeepEqual(recovered.Log, wantLog) {
+		t.Fatalf("recovered log = %#v, want %#v", recovered.Log, wantLog)
+	}
+}
+
 func TestWALRejectsConfiguredIdentityMismatch(t *testing.T) {
 	directory := t.TempDir()
 	wal, _, err := Open(directory, Identity{ClusterID: "cluster-1", NodeID: "node-1"})

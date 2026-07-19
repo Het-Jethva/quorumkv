@@ -33,6 +33,8 @@ const (
 	recordLogEntries      recordType = 4 // Legacy no-op-only entries.
 	recordLogEntriesV2    recordType = 5
 	recordLogEntryV3      recordType = 6
+	recordLogTruncation   recordType = 7
+	recordCommitIndex     recordType = 8
 )
 
 // Identity binds durable state to one Node in one Cluster.
@@ -63,9 +65,10 @@ type LogEntry struct {
 
 // RecoveredState is the latest valid state reconstructed from all WAL segments.
 type RecoveredState struct {
-	Identity  Identity
-	HardState HardState
-	Log       []LogEntry
+	Identity    Identity
+	HardState   HardState
+	Log         []LogEntry
+	CommitIndex uint64
 }
 
 // SaveLogEntries appends ordered entries and returns only after they are synced.
@@ -77,6 +80,12 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 	}
 	if len(entries) == 0 {
 		return errors.New("save log entries: at least one entry is required")
+	}
+	for offset, entry := range entries {
+		want := w.logLength + uint64(offset) + 1
+		if entry.Index != want {
+			return fmt.Errorf("save log entries: index %d follows index %d", entry.Index, want-1)
+		}
 	}
 	for _, entry := range entries {
 		payload := make([]byte, 49+len(entry.Key)+len(entry.Value))
@@ -96,6 +105,62 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync %d log entries: %w", len(entries), err)
 	}
+	w.logLength += uint64(len(entries))
+	return nil
+}
+
+// TruncateLog removes the suffix beginning at firstIndex and returns only
+// after the truncation record is synced. Committed history cannot be removed.
+func (w *WAL) TruncateLog(firstIndex uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("truncate log: WAL is closed")
+	}
+	if firstIndex == 0 || firstIndex > w.logLength+1 {
+		return fmt.Errorf("truncate log: first index %d is outside log ending at %d", firstIndex, w.logLength)
+	}
+	if firstIndex <= w.commitIndex {
+		return fmt.Errorf("truncate log: first index %d would remove committed index %d", firstIndex, w.commitIndex)
+	}
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, firstIndex)
+	if err := w.appendRecord(recordLogTruncation, payload); err != nil {
+		return fmt.Errorf("append log truncation from index %d: %w", firstIndex, err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync log truncation from index %d: %w", firstIndex, err)
+	}
+	w.logLength = firstIndex - 1
+	return nil
+}
+
+// SaveCommitIndex records the durable committed prefix and returns only after
+// the containing segment is synced.
+func (w *WAL) SaveCommitIndex(index uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("save commit index: WAL is closed")
+	}
+	if index < w.commitIndex {
+		return fmt.Errorf("save commit index: index decreased from %d to %d", w.commitIndex, index)
+	}
+	if index > w.logLength {
+		return fmt.Errorf("save commit index: index %d exceeds log ending at %d", index, w.logLength)
+	}
+	if index == w.commitIndex {
+		return nil
+	}
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, index)
+	if err := w.appendRecord(recordCommitIndex, payload); err != nil {
+		return fmt.Errorf("append commit index %d: %w", index, err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync commit index %d: %w", index, err)
+	}
+	w.commitIndex = index
 	return nil
 }
 
@@ -108,6 +173,8 @@ type WAL struct {
 	segment     uint64
 	file        *os.File
 	offset      int64
+	logLength   uint64
+	commitIndex uint64
 }
 
 // Open creates or recovers the WAL in directory. Existing durable identity
@@ -175,6 +242,8 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	wal.segment = last.number
 	wal.file = file
 	wal.offset = info.Size()
+	wal.logLength = uint64(len(recovered.Log))
+	wal.commitIndex = recovered.CommitIndex
 	return wal, recovered, nil
 }
 
@@ -442,6 +511,30 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
 		}
 		state.Log = append(state.Log, entry)
+	case recordLogTruncation:
+		if len(payload) != 8 {
+			return fmt.Errorf("log-truncation record length %d, want 8", len(payload))
+		}
+		firstIndex := binary.BigEndian.Uint64(payload)
+		if firstIndex == 0 || firstIndex > uint64(len(state.Log))+1 {
+			return fmt.Errorf("log truncation from index %d is outside log ending at %d", firstIndex, len(state.Log))
+		}
+		if firstIndex <= state.CommitIndex {
+			return fmt.Errorf("log truncation from index %d would remove committed index %d", firstIndex, state.CommitIndex)
+		}
+		state.Log = state.Log[:firstIndex-1]
+	case recordCommitIndex:
+		if len(payload) != 8 {
+			return fmt.Errorf("commit-index record length %d, want 8", len(payload))
+		}
+		index := binary.BigEndian.Uint64(payload)
+		if index < state.CommitIndex {
+			return fmt.Errorf("commit index decreased from %d to %d", state.CommitIndex, index)
+		}
+		if index > uint64(len(state.Log)) {
+			return fmt.Errorf("commit index %d exceeds log ending at %d", index, len(state.Log))
+		}
+		state.CommitIndex = index
 	default:
 		return fmt.Errorf("unknown record type %d", kind)
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/wal"
 )
 
 func TestProcessRestartDoesNotGrantSecondVoteInTerm(t *testing.T) {
@@ -52,6 +53,103 @@ func TestRaftRuntimeRestoresPersistedLog(t *testing.T) {
 	state := reopened.core.State()
 	if state.LastLogIndex != 1 || state.LastLogTerm != 1 {
 		t.Fatalf("recovered log state = %#v, want index 1 in Term 1", state)
+	}
+}
+
+func TestRaftRuntimeReplaysOnlyDurableCommittedPrefix(t *testing.T) {
+	directory := t.TempDir()
+	cfg := config.Config{
+		ClusterID:          "cluster-1",
+		ActiveSessionLimit: 1,
+		Node:               config.Node{ID: "node-1", DataDir: directory},
+	}
+	store, _, err := wal.Open(directory, wal.Identity{ClusterID: cfg.ClusterID, NodeID: cfg.Node.ID})
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	sessionID := [16]byte{1}
+	if err := store.SaveLogEntries([]wal.LogEntry{
+		{Index: 1, Term: 1, Type: wal.EntryType(raft.EntryOpenSession), SessionID: sessionID},
+		{Index: 2, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 1, Key: "committed", Value: []byte("kept")},
+		{Index: 3, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 2, Key: "uncommitted", Value: []byte("ignored")},
+	}); err != nil {
+		t.Fatalf("save log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	runtime, err := openRaftRuntime(cfg, []raft.NodeID{"node-2", "node-3"})
+	if err != nil {
+		t.Fatalf("recover runtime: %v", err)
+	}
+	defer runtime.close()
+	actions, err := runtime.step(raft.RecoverCommitted{})
+	if err != nil {
+		t.Fatalf("replay committed prefix: %v", err)
+	}
+	machine := newSessionMachine(cfg.ActiveSessionLimit)
+	for _, action := range actions {
+		apply, ok := action.(raft.ApplyEntry)
+		if !ok {
+			t.Fatalf("recovery action = %T, want ApplyEntry", action)
+		}
+		machine.apply(apply.Entry)
+	}
+	if got := string(machine.values["committed"]); got != "kept" {
+		t.Fatalf("recovered committed Value = %q, want kept", got)
+	}
+	if _, exists := machine.values["uncommitted"]; exists {
+		t.Fatal("uncommitted suffix was applied during recovery")
+	}
+	if state := runtime.core.State(); state.CommitIndex != 2 || state.LastApplied != 2 || state.LastLogIndex != 3 {
+		t.Fatalf("recovered Raft state = %#v, want applied through 2 with log through 3", state)
+	}
+}
+
+func TestRaftRuntimePersistsConflictingSuffixReplacement(t *testing.T) {
+	cfg := config.Config{
+		ClusterID: "cluster-1",
+		Node:      config.Node{ID: "node-2", DataDir: t.TempDir()},
+	}
+	runtime, err := openRaftRuntime(cfg, []raft.NodeID{"node-1", "node-3"})
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	if _, err := runtime.step(raft.AppendEntries{
+		From: "node-1",
+		Term: 1,
+		Entries: []raft.LogEntry{
+			{Index: 1, Term: 1},
+			{Index: 2, Term: 1},
+		},
+	}); err != nil {
+		t.Fatalf("persist initial suffix: %v", err)
+	}
+	if _, err := runtime.step(raft.AppendEntries{
+		From:         "node-1",
+		Term:         2,
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries:      []raft.LogEntry{{Index: 2, Term: 2}},
+	}); err != nil {
+		t.Fatalf("persist replacement suffix: %v", err)
+	}
+	if err := runtime.close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+
+	reopened, err := openRaftRuntime(cfg, []raft.NodeID{"node-1", "node-3"})
+	if err != nil {
+		t.Fatalf("reopen runtime: %v", err)
+	}
+	defer reopened.close()
+	state := reopened.core.State()
+	if state.LastLogIndex != 2 || state.LastLogTerm != 2 {
+		t.Fatalf("recovered replacement state = %#v, want index 2 in Term 2", state)
 	}
 }
 

@@ -192,6 +192,14 @@ func TestCommittedEntriesApplyOnceInOrder(t *testing.T) {
 	node.Step(raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{entry}, LeaderCommit: 1})
 	node.Step(raft.HardStatePersisted{PersistenceID: 1})
 	actions := node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	wantPersistence := []raft.Action{raft.PersistCommitIndex{PersistenceID: 1, CommitIndex: 1}}
+	if !reflect.DeepEqual(actions, wantPersistence) {
+		t.Fatalf("durable log actions = %#v, want commit persistence: %#v", actions, wantPersistence)
+	}
+	if state := node.State(); state.LastApplied != 0 || state.CommitIndex != 1 {
+		t.Fatalf("state before commit persistence = %#v, want committed but not applied", state)
+	}
+	actions = node.Step(raft.CommitIndexPersisted{PersistenceID: 1})
 	want := []raft.Action{
 		raft.ApplyEntry{Entry: entry},
 		raft.SendAppendEntriesResponse{To: "node-1", Response: raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1}},
@@ -234,9 +242,14 @@ func TestLeaderCommitsDirectlyOnlyAnEntryFromItsCurrentTerm(t *testing.T) {
 		t.Fatalf("old-Term quorum response actions = %#v, state = %#v; want no direct commit", actions, node.State())
 	}
 	actions = node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 3, Success: true, MatchIndex: 2})
-	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 2 || !state.ReadReady {
-		t.Fatalf("current-Term quorum state = %#v, want committed and ready through 2", state)
+	wantPersistence := []raft.Action{raft.PersistCommitIndex{PersistenceID: 1, CommitIndex: 2}}
+	if !reflect.DeepEqual(actions, wantPersistence) {
+		t.Fatalf("current-Term quorum actions = %#v, want commit persistence %#v", actions, wantPersistence)
 	}
+	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 0 || state.ReadReady {
+		t.Fatalf("current-Term quorum state = %#v, want unapplied until commit persistence", state)
+	}
+	actions = node.Step(raft.CommitIndexPersisted{PersistenceID: 1})
 	want := []raft.Action{
 		raft.ApplyEntry{Entry: raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}},
 		raft.ApplyEntry{Entry: raft.LogEntry{Index: 2, Term: 3, Type: raft.EntryNoOp}},
@@ -260,6 +273,7 @@ func TestSetAppliesOnlyAfterDurableQuorumReplication(t *testing.T) {
 	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
 	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
 	node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1})
+	node.Step(raft.CommitIndexPersisted{PersistenceID: 1})
 
 	value := []byte{0, 1, 2, 255}
 	actions := node.Step(raft.ProposeSet{
@@ -289,10 +303,18 @@ func TestSetAppliesOnlyAfterDurableQuorumReplication(t *testing.T) {
 		}
 	}
 	actions = node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 2})
+	wantCommit := []raft.Action{raft.PersistCommitIndex{PersistenceID: 2, CommitIndex: 2}}
+	if !reflect.DeepEqual(actions, wantCommit) {
+		t.Fatalf("SET Quorum acknowledgement actions = %#v, want commit persistence %#v", actions, wantCommit)
+	}
+	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 1 {
+		t.Fatalf("state after SET Quorum = %#v, want committed but not applied through 2", state)
+	}
+	actions = node.Step(raft.CommitIndexPersisted{PersistenceID: 2})
 	if len(actions) == 0 || !reflect.DeepEqual(actions[0], raft.ApplyEntry{Entry: wantEntry}) {
-		t.Fatalf("SET Quorum acknowledgement actions = %#v, want ApplyEntry first", actions)
+		t.Fatalf("SET durable commit actions = %#v, want ApplyEntry first", actions)
 	}
 	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 2 {
-		t.Fatalf("state after SET Quorum = %#v, want committed and applied through 2", state)
+		t.Fatalf("state after durable SET commit = %#v, want committed and applied through 2", state)
 	}
 }

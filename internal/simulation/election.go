@@ -237,6 +237,8 @@ func (c *Cluster) process(initial scheduledEvent) error {
 				queue = append(queue, scheduledEvent{node: next.node, event: raft.HardStatePersisted{PersistenceID: action.PersistenceID}})
 			case raft.PersistLogEntries:
 				queue = append(queue, scheduledEvent{node: next.node, event: raft.LogEntriesPersisted{PersistenceID: action.PersistenceID}})
+			case raft.PersistCommitIndex:
+				queue = append(queue, scheduledEvent{node: next.node, event: raft.CommitIndexPersisted{PersistenceID: action.PersistenceID}})
 			case raft.SendPreVoteRequest:
 				c.deliver(&queue, next.node, action.To, action.Request)
 			case raft.SendPreVoteResponse:
