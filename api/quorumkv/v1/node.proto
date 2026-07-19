@@ -159,6 +159,8 @@ message SendRequest {
     VoteResponse vote_response = 8;
     AppendEntriesRequest append_entries_request = 9;
     AppendEntriesResponse append_entries_response = 10;
+    InstallSnapshotRequest install_snapshot_request = 11;
+    InstallSnapshotResponse install_snapshot_response = 12;
   }
 }
 
@@ -205,6 +207,27 @@ message AppendEntriesResponse {
   uint64 request_id = 5;
   uint64 conflict_term = 6;
   uint64 conflict_index = 7;
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  uint64 request_id = 2;
+  uint64 snapshot_index = 3;
+  uint64 snapshot_term = 4;
+  uint64 snapshot_length = 5;
+  uint32 snapshot_checksum = 6;
+  uint64 offset = 7;
+  bytes data = 8;
+  bool done = 9;
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  uint64 request_id = 2;
+  bool success = 3;
+  uint64 next_offset = 4;
+  uint64 snapshot_index = 5;
+  bool done = 6;
 }
 
 message RaftLogEntry {

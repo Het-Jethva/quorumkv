@@ -321,10 +321,31 @@ func (w *WAL) Compact(snapshotIndex, snapshotTerm uint64) error {
 	if snapshotIndex == 0 || snapshotIndex > w.commitIndex {
 		return fmt.Errorf("compact WAL: Snapshot index %d is outside committed prefix ending at %d", snapshotIndex, w.commitIndex)
 	}
-	checkpoint := compactionCheckpoint{
-		Identity: w.identity, HardState: w.hardState, CommitIndex: w.commitIndex,
-		SnapshotIndex: snapshotIndex, SnapshotTerm: snapshotTerm,
+	return w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, w.commitIndex)
+}
+
+// InstallSnapshot advances durable recovery state to a Snapshot received from
+// the Leader. Unlike local compaction, the included index may be newer than
+// this Follower's retained log and commit index.
+func (w *WAL) InstallSnapshot(snapshotIndex, snapshotTerm uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("install Snapshot in WAL: WAL is closed")
 	}
+	if snapshotIndex == 0 || snapshotTerm == 0 || snapshotIndex < w.snapshotIndex {
+		return fmt.Errorf("install Snapshot in WAL: invalid position %d/%d after %d/%d", snapshotIndex, snapshotTerm, w.snapshotIndex, w.snapshotTerm)
+	}
+	if err := w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, max(w.commitIndex, snapshotIndex)); err != nil {
+		return err
+	}
+	w.commitIndex = max(w.commitIndex, snapshotIndex)
+	w.lastLogIndex = max(w.lastLogIndex, snapshotIndex)
+	return nil
+}
+
+func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex uint64) error {
+	checkpoint := compactionCheckpoint{Identity: w.identity, HardState: w.hardState, CommitIndex: commitIndex, SnapshotIndex: snapshotIndex, SnapshotTerm: snapshotTerm}
 	payload, err := json.Marshal(checkpoint)
 	if err != nil {
 		return fmt.Errorf("encode WAL compaction checkpoint: %w", err)
@@ -336,7 +357,6 @@ func (w *WAL) Compact(snapshotIndex, snapshotTerm uint64) error {
 		return fmt.Errorf("sync WAL compaction checkpoint: %w", err)
 	}
 	w.snapshotIndex, w.snapshotTerm = snapshotIndex, snapshotTerm
-
 	segments, err := findSegments(w.directory)
 	if err != nil {
 		return err
@@ -349,11 +369,10 @@ func (w *WAL) Compact(snapshotIndex, snapshotTerm uint64) error {
 		if err != nil {
 			return err
 		}
-		if !covered {
-			continue
-		}
-		if err := os.Remove(segment.path); err != nil {
-			return fmt.Errorf("delete compacted WAL segment %q: %w", segment.path, err)
+		if covered {
+			if err := os.Remove(segment.path); err != nil {
+				return fmt.Errorf("delete compacted WAL segment %q: %w", segment.path, err)
+			}
 		}
 	}
 	if err := syncDirectory(w.directory); err != nil {

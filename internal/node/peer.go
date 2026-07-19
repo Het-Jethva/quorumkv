@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"time"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/snapshot"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -101,6 +103,9 @@ func newPeerTransport(cfg config.Config) *peerTransport {
 }
 
 func (t *peerTransport) send(ctx context.Context, action raft.Action) error {
+	if snapshotAction, ok := action.(raft.SendInstallSnapshot); ok {
+		return t.sendSnapshot(ctx, snapshotAction)
+	}
 	to, message, err := encodeRaftAction(t.config, action)
 	if err != nil {
 		return err
@@ -118,6 +123,33 @@ func (t *peerTransport) send(ctx context.Context, action raft.Action) error {
 			return peerConfigurationError{err: sendErr}
 		}
 		return sendErr
+	}
+	return nil
+}
+
+func (t *peerTransport) sendSnapshot(ctx context.Context, action raft.SendInstallSnapshot) error {
+	contents, err := snapshot.Encoded(t.config.Node.DataDir, action.SnapshotIndex, action.SnapshotTerm)
+	if err != nil {
+		return fmt.Errorf("load snapshot for transfer: %w", err)
+	}
+	if action.Offset > uint64(len(contents)) {
+		return fmt.Errorf("snapshot transfer offset %d exceeds length %d", action.Offset, len(contents))
+	}
+	const chunkSize = 64 << 10
+	end := action.Offset + chunkSize
+	if end > uint64(len(contents)) {
+		end = uint64(len(contents))
+	}
+	client, err := t.client(ctx, action.To)
+	if err != nil {
+		return err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, peerRPCTimeout)
+	defer cancel()
+	_, err = client.client.Send(requestCtx, &quorumkvv1.SendRequest{ProtocolVersion: peerProtocolVersion, ClusterId: t.config.ClusterID, FromNodeId: t.config.Node.ID, ToNodeId: string(action.To), Message: &quorumkvv1.SendRequest_InstallSnapshotRequest{InstallSnapshotRequest: &quorumkvv1.InstallSnapshotRequest{Term: action.Term, RequestId: action.RequestID, SnapshotIndex: action.SnapshotIndex, SnapshotTerm: action.SnapshotTerm, SnapshotLength: uint64(len(contents)), SnapshotChecksum: crc32.ChecksumIEEE(contents), Offset: action.Offset, Data: append([]byte(nil), contents[action.Offset:end]...), Done: end == uint64(len(contents))}}})
+	if err != nil {
+		t.drop(action.To)
+		return fmt.Errorf("send snapshot chunk to Node %q: %w", action.To, err)
 	}
 	return nil
 }
@@ -208,6 +240,9 @@ func encodeRaftAction(cfg config.Config, action raft.Action) (raft.NodeID, *quor
 	case raft.SendAppendEntriesResponse:
 		to = action.To
 		request.Message = &quorumkvv1.SendRequest_AppendEntriesResponse{AppendEntriesResponse: &quorumkvv1.AppendEntriesResponse{Term: action.Response.Term, RequestId: action.Response.RequestID, Success: action.Response.Success, MatchIndex: action.Response.MatchIndex, ConflictTerm: action.Response.ConflictTerm, ConflictIndex: action.Response.ConflictIndex, ReadId: uint64(action.Response.ReadID)}}
+	case raft.SendInstallSnapshotResponse:
+		to = action.To
+		request.Message = &quorumkvv1.SendRequest_InstallSnapshotResponse{InstallSnapshotResponse: &quorumkvv1.InstallSnapshotResponse{Term: action.Response.Term, RequestId: action.Response.RequestID, Success: action.Response.Success, NextOffset: action.Response.NextOffset, SnapshotIndex: action.Response.SnapshotIndex, Done: action.Response.Done}}
 	default:
 		return "", nil, fmt.Errorf("encode unsupported Raft action %T", action)
 	}
@@ -246,6 +281,12 @@ func decodeRaftMessage(request *quorumkvv1.SendRequest) (raft.Event, error) {
 		return raft.AppendEntries{From: from, Term: message.AppendEntriesRequest.Term, RequestID: message.AppendEntriesRequest.RequestId, PrevLogIndex: message.AppendEntriesRequest.PreviousLogIndex, PrevLogTerm: message.AppendEntriesRequest.PreviousLogTerm, Entries: entries, LeaderCommit: message.AppendEntriesRequest.LeaderCommit, ReadID: raft.ReadID(message.AppendEntriesRequest.ReadId)}, nil
 	case *quorumkvv1.SendRequest_AppendEntriesResponse:
 		return raft.AppendEntriesResponse{From: from, Term: message.AppendEntriesResponse.Term, RequestID: message.AppendEntriesResponse.RequestId, Success: message.AppendEntriesResponse.Success, MatchIndex: message.AppendEntriesResponse.MatchIndex, ConflictTerm: message.AppendEntriesResponse.ConflictTerm, ConflictIndex: message.AppendEntriesResponse.ConflictIndex, ReadID: raft.ReadID(message.AppendEntriesResponse.ReadId)}, nil
+	case *quorumkvv1.SendRequest_InstallSnapshotRequest:
+		s := message.InstallSnapshotRequest
+		return raft.InstallSnapshot{From: from, Term: s.Term, RequestID: s.RequestId, SnapshotIndex: s.SnapshotIndex, SnapshotTerm: s.SnapshotTerm, Length: s.SnapshotLength, Checksum: s.SnapshotChecksum, Offset: s.Offset, Data: append([]byte(nil), s.Data...), Done: s.Done}, nil
+	case *quorumkvv1.SendRequest_InstallSnapshotResponse:
+		s := message.InstallSnapshotResponse
+		return raft.InstallSnapshotResponse{From: from, Term: s.Term, RequestID: s.RequestId, SnapshotIndex: s.SnapshotIndex, Success: s.Success, NextOffset: s.NextOffset, Done: s.Done}, nil
 	default:
 		return nil, fmt.Errorf("raft message payload is required")
 	}
