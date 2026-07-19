@@ -42,6 +42,9 @@ members:
 	if cfg.ClusterID != "test-cluster" || cfg.Node.ID != "node-1" {
 		t.Fatalf("Load() identity = %q/%q, want test-cluster/node-1", cfg.ClusterID, cfg.Node.ID)
 	}
+	if got := cfg.EffectiveSnapshotThresholdBytes(); got != config.DefaultSnapshotThresholdBytes {
+		t.Fatalf("default Snapshot threshold = %d, want %d", got, config.DefaultSnapshotThresholdBytes)
+	}
 	wantDataDir := filepath.Join(directory, "data", "node-1")
 	if cfg.Node.DataDir != wantDataDir {
 		t.Fatalf("Load() data dir = %q, want %q", cfg.Node.DataDir, wantDataDir)
@@ -85,6 +88,14 @@ func TestValidateReportsAllInvalidSettings(t *testing.T) {
 		if !strings.Contains(err.Error(), detail) {
 			t.Errorf("Validate() error = %q, want %q", err, detail)
 		}
+	}
+}
+
+func TestValidateRejectsNegativeSnapshotThreshold(t *testing.T) {
+	cfg := configForTest()
+	cfg.SnapshotThresholdBytes = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "snapshot_threshold_bytes") {
+		t.Fatalf("Validate() error = %v, want Snapshot threshold diagnostic", err)
 	}
 }
 

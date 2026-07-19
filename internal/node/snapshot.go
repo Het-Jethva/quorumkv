@@ -10,10 +10,11 @@ import (
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
 	"github.com/Het-Jethva/quorumkv/internal/snapshot"
+	"github.com/Het-Jethva/quorumkv/internal/wal"
 )
 
-// CreateSnapshot synchronously captures this Node's applied replicated state.
-// Automatic asynchronous capture is intentionally deferred.
+// CreateSnapshot requests a manual Snapshot and waits for its durable
+// installation. The apply loop clones state; file I/O proceeds asynchronously.
 func (n *Node) CreateSnapshot(ctx context.Context) error {
 	result := make(chan error, 1)
 	input := raftInput{snapshotResult: result}
@@ -34,10 +35,15 @@ func (n *Node) CreateSnapshot(ctx context.Context) error {
 	}
 }
 
-func saveSnapshot(cfg config.Config, state raft.State, machine *sessionMachine) error {
-	_, err := snapshot.Save(cfg.Node.DataDir, machine.snapshot(snapshotIdentity(cfg), state.LastApplied, state.LastAppliedTerm))
-	if err != nil {
-		return fmt.Errorf("create Snapshot through index %d: %w", state.LastApplied, err)
+func installSnapshot(directory string, state snapshot.State, store *wal.WAL) error {
+	if _, err := snapshot.Save(directory, state); err != nil {
+		return fmt.Errorf("create Snapshot through index %d: %w", state.IncludedIndex, err)
+	}
+	if state.IncludedIndex == 0 {
+		return nil
+	}
+	if err := store.Compact(state.IncludedIndex, state.IncludedTerm); err != nil {
+		return fmt.Errorf("compact WAL through Snapshot index %d: %w", state.IncludedIndex, err)
 	}
 	return nil
 }

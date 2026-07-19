@@ -3,12 +3,14 @@ package wal
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -26,14 +28,15 @@ const (
 type recordType byte
 
 const (
-	recordClusterIdentity recordType = 1
-	recordNodeIdentity    recordType = 2
-	recordHardState       recordType = 3
-	recordLogEntries      recordType = 4 // Legacy no-op-only entries.
-	recordLogEntriesV2    recordType = 5
-	recordLogEntryV3      recordType = 6
-	recordLogTruncation   recordType = 7
-	recordCommitIndex     recordType = 8
+	recordClusterIdentity      recordType = 1
+	recordNodeIdentity         recordType = 2
+	recordHardState            recordType = 3
+	recordLogEntries           recordType = 4 // Legacy no-op-only entries.
+	recordLogEntriesV2         recordType = 5
+	recordLogEntryV3           recordType = 6
+	recordLogTruncation        recordType = 7
+	recordCommitIndex          recordType = 8
+	recordCompactionCheckpoint recordType = 9
 )
 
 // Identity binds durable state to one Node in one Cluster.
@@ -64,10 +67,20 @@ type LogEntry struct {
 
 // RecoveredState is the latest valid state reconstructed from all WAL segments.
 type RecoveredState struct {
-	Identity    Identity
-	HardState   HardState
-	Log         []LogEntry
-	CommitIndex uint64
+	Identity      Identity
+	HardState     HardState
+	Log           []LogEntry
+	CommitIndex   uint64
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
+}
+
+type compactionCheckpoint struct {
+	Identity      Identity  `json:"identity"`
+	HardState     HardState `json:"hard_state"`
+	CommitIndex   uint64    `json:"commit_index"`
+	SnapshotIndex uint64    `json:"snapshot_index"`
+	SnapshotTerm  uint64    `json:"snapshot_term"`
 }
 
 // SaveLogEntries appends ordered entries and returns only after they are synced.
@@ -81,7 +94,7 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 		return errors.New("save log entries: at least one entry is required")
 	}
 	for offset, entry := range entries {
-		want := w.logLength + uint64(offset) + 1
+		want := w.lastLogIndex + uint64(offset) + 1
 		if entry.Index != want {
 			return fmt.Errorf("save log entries: index %d follows index %d", entry.Index, want-1)
 		}
@@ -100,11 +113,12 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 		if err := w.appendRecord(recordLogEntryV3, payload); err != nil {
 			return fmt.Errorf("append log entry at index %d: %w", entry.Index, err)
 		}
+		w.entryBytes[entry.Index] = uint64(frameHeaderSize) + 1 + uint64(len(payload))
 	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync %d log entries: %w", len(entries), err)
 	}
-	w.logLength += uint64(len(entries))
+	w.lastLogIndex += uint64(len(entries))
 	return nil
 }
 
@@ -116,8 +130,8 @@ func (w *WAL) TruncateLog(firstIndex uint64) error {
 	if w.file == nil {
 		return errors.New("truncate log: WAL is closed")
 	}
-	if firstIndex == 0 || firstIndex > w.logLength+1 {
-		return fmt.Errorf("truncate log: first index %d is outside log ending at %d", firstIndex, w.logLength)
+	if firstIndex == 0 || firstIndex > w.lastLogIndex+1 {
+		return fmt.Errorf("truncate log: first index %d is outside log ending at %d", firstIndex, w.lastLogIndex)
 	}
 	if firstIndex <= w.commitIndex {
 		return fmt.Errorf("truncate log: first index %d would remove committed index %d", firstIndex, w.commitIndex)
@@ -130,7 +144,10 @@ func (w *WAL) TruncateLog(firstIndex uint64) error {
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync log truncation from index %d: %w", firstIndex, err)
 	}
-	w.logLength = firstIndex - 1
+	for index := firstIndex; index <= w.lastLogIndex; index++ {
+		delete(w.entryBytes, index)
+	}
+	w.lastLogIndex = firstIndex - 1
 	return nil
 }
 
@@ -145,8 +162,8 @@ func (w *WAL) SaveCommitIndex(index uint64) error {
 	if index < w.commitIndex {
 		return fmt.Errorf("save commit index: index decreased from %d to %d", w.commitIndex, index)
 	}
-	if index > w.logLength {
-		return fmt.Errorf("save commit index: index %d exceeds log ending at %d", index, w.logLength)
+	if index > w.lastLogIndex {
+		return fmt.Errorf("save commit index: index %d exceeds log ending at %d", index, w.lastLogIndex)
 	}
 	if index == w.commitIndex {
 		return nil
@@ -166,14 +183,19 @@ func (w *WAL) SaveCommitIndex(index uint64) error {
 // WAL is an ordered, synced sequence of consensus records. A WAL must not be
 // used after Close.
 type WAL struct {
-	mu          sync.Mutex
-	directory   string
-	segmentSize int64
-	segment     uint64
-	file        *os.File
-	offset      int64
-	logLength   uint64
-	commitIndex uint64
+	mu            sync.Mutex
+	directory     string
+	segmentSize   int64
+	segment       uint64
+	file          *os.File
+	offset        int64
+	lastLogIndex  uint64
+	commitIndex   uint64
+	hardState     HardState
+	identity      Identity
+	snapshotIndex uint64
+	snapshotTerm  uint64
+	entryBytes    map[uint64]uint64
 }
 
 // Open creates or recovers the WAL in directory. Existing durable identity
@@ -197,7 +219,7 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	if err != nil {
 		return nil, RecoveredState{}, err
 	}
-	wal := &WAL{directory: directory, segmentSize: segmentSize}
+	wal := &WAL{directory: directory, segmentSize: segmentSize, identity: identity, entryBytes: make(map[uint64]uint64)}
 	if len(segments) == 0 {
 		if err := wal.createSegment(1); err != nil {
 			return nil, RecoveredState{}, err
@@ -241,8 +263,14 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	wal.segment = last.number
 	wal.file = file
 	wal.offset = info.Size()
-	wal.logLength = uint64(len(recovered.Log))
+	wal.lastLogIndex = recovered.SnapshotIndex + uint64(len(recovered.Log))
 	wal.commitIndex = recovered.CommitIndex
+	wal.hardState = recovered.HardState
+	wal.snapshotIndex = recovered.SnapshotIndex
+	wal.snapshotTerm = recovered.SnapshotTerm
+	for _, entry := range recovered.Log {
+		wal.entryBytes[entry.Index] = uint64(frameHeaderSize) + 1 + 49 + uint64(len(entry.Key)+len(entry.Value))
+	}
 	return wal, recovered, nil
 }
 
@@ -262,6 +290,79 @@ func (w *WAL) SaveHardState(state HardState) error {
 	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync hard state for Term %d: %w", state.Term, err)
+	}
+	w.hardState = state
+	return nil
+}
+
+// RetainedLogBytes reports durable frame bytes for applied entries newer than
+// the installed Snapshot. The runtime uses this value for automatic capture.
+func (w *WAL) RetainedLogBytes(throughIndex uint64) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var total uint64
+	for index, size := range w.entryBytes {
+		if index > w.snapshotIndex && index <= throughIndex {
+			total += size
+		}
+	}
+	return total
+}
+
+// Compact records a durable recovery checkpoint, then removes complete WAL
+// segments whose consensus records are fully represented by the Snapshot.
+// The active segment is always retained.
+func (w *WAL) Compact(snapshotIndex, snapshotTerm uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("compact WAL: WAL is closed")
+	}
+	if snapshotIndex == 0 || snapshotIndex > w.commitIndex {
+		return fmt.Errorf("compact WAL: Snapshot index %d is outside committed prefix ending at %d", snapshotIndex, w.commitIndex)
+	}
+	checkpoint := compactionCheckpoint{
+		Identity: w.identity, HardState: w.hardState, CommitIndex: w.commitIndex,
+		SnapshotIndex: snapshotIndex, SnapshotTerm: snapshotTerm,
+	}
+	payload, err := json.Marshal(checkpoint)
+	if err != nil {
+		return fmt.Errorf("encode WAL compaction checkpoint: %w", err)
+	}
+	if err := w.appendRecord(recordCompactionCheckpoint, payload); err != nil {
+		return fmt.Errorf("append WAL compaction checkpoint: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync WAL compaction checkpoint: %w", err)
+	}
+	w.snapshotIndex, w.snapshotTerm = snapshotIndex, snapshotTerm
+
+	segments, err := findSegments(w.directory)
+	if err != nil {
+		return err
+	}
+	for _, segment := range segments {
+		if segment.number == w.segment {
+			continue
+		}
+		covered, err := segmentCoveredBySnapshot(segment.path, snapshotIndex)
+		if err != nil {
+			return err
+		}
+		if !covered {
+			continue
+		}
+		if err := os.Remove(segment.path); err != nil {
+			return fmt.Errorf("delete compacted WAL segment %q: %w", segment.path, err)
+		}
+	}
+	if err := syncDirectory(w.directory); err != nil {
+		return fmt.Errorf("sync WAL directory after compaction: %w", err)
+	}
+	for index := range w.entryBytes {
+		if index <= snapshotIndex {
+			delete(w.entryBytes, index)
+		}
 	}
 	return nil
 }
@@ -301,10 +402,9 @@ func findSegments(directory string) ([]segmentFile, error) {
 		segments = append(segments, segmentFile{number: number, path: path})
 	}
 	sort.Slice(segments, func(i, j int) bool { return segments[i].number < segments[j].number })
-	for index, segment := range segments {
-		want := uint64(index + 1)
-		if segment.number != want {
-			return nil, fmt.Errorf("WAL segment sequence contains %d, want %d", segment.number, want)
+	for index := 1; index < len(segments); index++ {
+		if segments[index-1].number == segments[index].number {
+			return nil, fmt.Errorf("duplicate WAL segment number %d", segments[index].number)
 		}
 	}
 	return segments, nil
@@ -361,7 +461,15 @@ func (w *WAL) appendRecord(kind recordType, payload []byte) error {
 }
 
 func recoverSegments(segments []segmentFile) (RecoveredState, error) {
-	var state RecoveredState
+	checkpoint, err := newestCompactionCheckpoint(segments)
+	if err != nil {
+		return RecoveredState{}, err
+	}
+	state := RecoveredState{
+		Identity: checkpoint.Identity, HardState: checkpoint.HardState,
+		CommitIndex: checkpoint.CommitIndex, SnapshotIndex: checkpoint.SnapshotIndex,
+		SnapshotTerm: checkpoint.SnapshotTerm,
+	}
 	for index, segment := range segments {
 		finalSegment := index == len(segments)-1
 		flags := os.O_RDONLY
@@ -465,7 +573,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 	switch kind {
 	case recordClusterIdentity:
 		if state.Identity.ClusterID != "" {
-			return errors.New("duplicate Cluster Identity record")
+			if state.Identity.ClusterID != string(payload) {
+				return errors.New("cluster Identity conflicts with compaction checkpoint")
+			}
+			return nil
 		}
 		state.Identity.ClusterID = string(payload)
 	case recordNodeIdentity:
@@ -473,7 +584,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			return errors.New("node identity appears before Cluster Identity")
 		}
 		if state.Identity.NodeID != "" {
-			return errors.New("duplicate Node Identity record")
+			if state.Identity.NodeID != string(payload) {
+				return errors.New("node Identity conflicts with compaction checkpoint")
+			}
+			return nil
 		}
 		state.Identity.NodeID = string(payload)
 	case recordHardState:
@@ -485,7 +599,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 		}
 		term := binary.BigEndian.Uint64(payload[:8])
 		if term < state.HardState.Term {
-			return fmt.Errorf("hard-state Term decreased from %d to %d", state.HardState.Term, term)
+			return nil
+		}
+		if term == state.HardState.Term && state.HardState.VotedFor != "" {
+			return nil
 		}
 		state.HardState = HardState{Term: term, VotedFor: string(payload[8:])}
 	case recordLogEntries:
@@ -498,7 +615,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 				Term:  binary.BigEndian.Uint64(payload[offset+8 : offset+16]),
 				Type:  EntryType(payload[offset+16]),
 			}
-			lastIndex := uint64(len(state.Log))
+			if entry.Index <= state.SnapshotIndex {
+				continue
+			}
+			lastIndex := state.SnapshotIndex + uint64(len(state.Log))
 			if entry.Index != lastIndex+1 {
 				return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
 			}
@@ -515,7 +635,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 				Type:  EntryType(payload[offset+16]),
 			}
 			copy(entry.SessionID[:], payload[offset+17:offset+33])
-			lastIndex := uint64(len(state.Log))
+			if entry.Index <= state.SnapshotIndex {
+				continue
+			}
+			lastIndex := state.SnapshotIndex + uint64(len(state.Log))
 			if entry.Index != lastIndex+1 {
 				return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
 			}
@@ -540,7 +663,10 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			Value:    append([]byte(nil), payload[49+keyLength:]...),
 		}
 		copy(entry.SessionID[:], payload[17:33])
-		lastIndex := uint64(len(state.Log))
+		if entry.Index <= state.SnapshotIndex {
+			return nil
+		}
+		lastIndex := state.SnapshotIndex + uint64(len(state.Log))
 		if entry.Index != lastIndex+1 {
 			return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
 		}
@@ -550,27 +676,160 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			return fmt.Errorf("log-truncation record length %d, want 8", len(payload))
 		}
 		firstIndex := binary.BigEndian.Uint64(payload)
-		if firstIndex == 0 || firstIndex > uint64(len(state.Log))+1 {
-			return fmt.Errorf("log truncation from index %d is outside log ending at %d", firstIndex, len(state.Log))
+		lastIndex := state.SnapshotIndex + uint64(len(state.Log))
+		if firstIndex <= state.SnapshotIndex || firstIndex > lastIndex+1 {
+			return fmt.Errorf("log truncation from index %d is outside retained log ending at %d", firstIndex, lastIndex)
 		}
 		if firstIndex <= state.CommitIndex {
 			return fmt.Errorf("log truncation from index %d would remove committed index %d", firstIndex, state.CommitIndex)
 		}
-		state.Log = state.Log[:firstIndex-1]
+		state.Log = state.Log[:firstIndex-state.SnapshotIndex-1]
 	case recordCommitIndex:
 		if len(payload) != 8 {
 			return fmt.Errorf("commit-index record length %d, want 8", len(payload))
 		}
 		index := binary.BigEndian.Uint64(payload)
 		if index < state.CommitIndex {
-			return fmt.Errorf("commit index decreased from %d to %d", state.CommitIndex, index)
+			return nil
 		}
-		if index > uint64(len(state.Log)) {
-			return fmt.Errorf("commit index %d exceeds log ending at %d", index, len(state.Log))
+		lastIndex := state.SnapshotIndex + uint64(len(state.Log))
+		if index > lastIndex {
+			return fmt.Errorf("commit index %d exceeds log ending at %d", index, lastIndex)
 		}
 		state.CommitIndex = index
+	case recordCompactionCheckpoint:
+		var checkpoint compactionCheckpoint
+		if err := json.Unmarshal(payload, &checkpoint); err != nil {
+			return fmt.Errorf("decode compaction checkpoint: %w", err)
+		}
+		if checkpoint.Identity != state.Identity {
+			return errors.New("compaction checkpoint conflicts with durable identity")
+		}
+		if checkpoint.SnapshotIndex > state.SnapshotIndex {
+			return errors.New("compaction checkpoint is newer than recovery metadata")
+		}
 	default:
 		return fmt.Errorf("unknown record type %d", kind)
 	}
 	return nil
+}
+
+func newestCompactionCheckpoint(segments []segmentFile) (compactionCheckpoint, error) {
+	var newest compactionCheckpoint
+	for index, segment := range segments {
+		err := scanSegmentFrames(segment.path, index == len(segments)-1, func(kind recordType, payload []byte) error {
+			if kind != recordCompactionCheckpoint {
+				return nil
+			}
+			var checkpoint compactionCheckpoint
+			if err := json.Unmarshal(payload, &checkpoint); err != nil {
+				return fmt.Errorf("decode WAL compaction checkpoint in %q: %w", segment.path, err)
+			}
+			if strings.TrimSpace(checkpoint.Identity.ClusterID) == "" || strings.TrimSpace(checkpoint.Identity.NodeID) == "" {
+				return fmt.Errorf("WAL compaction checkpoint in %q has incomplete durable identity", segment.path)
+			}
+			if checkpoint.SnapshotIndex == 0 || checkpoint.SnapshotTerm == 0 || checkpoint.SnapshotIndex > checkpoint.CommitIndex {
+				return fmt.Errorf("WAL compaction checkpoint in %q has invalid Snapshot position %d/%d at commit %d", segment.path, checkpoint.SnapshotIndex, checkpoint.SnapshotTerm, checkpoint.CommitIndex)
+			}
+			newest = checkpoint
+			return nil
+		})
+		if err != nil {
+			return compactionCheckpoint{}, err
+		}
+	}
+	return newest, nil
+}
+
+func segmentCoveredBySnapshot(path string, snapshotIndex uint64) (bool, error) {
+	covered := true
+	err := scanSegmentFrames(path, false, func(kind recordType, payload []byte) error {
+		switch kind {
+		case recordLogEntries:
+			for offset := 0; offset+17 <= len(payload); offset += 17 {
+				if binary.BigEndian.Uint64(payload[offset:offset+8]) > snapshotIndex {
+					covered = false
+				}
+			}
+		case recordLogEntriesV2:
+			for offset := 0; offset+33 <= len(payload); offset += 33 {
+				if binary.BigEndian.Uint64(payload[offset:offset+8]) > snapshotIndex {
+					covered = false
+				}
+			}
+		case recordLogEntryV3:
+			if len(payload) < 8 || binary.BigEndian.Uint64(payload[:8]) > snapshotIndex {
+				covered = false
+			}
+		case recordLogTruncation:
+			if len(payload) != 8 || binary.BigEndian.Uint64(payload) > snapshotIndex {
+				covered = false
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return covered, nil
+}
+
+func scanSegmentFrames(path string, tolerateInterruptedTail bool, visit func(recordType, []byte) error) error {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read WAL segment %q: %w", path, err)
+	}
+	if int64(len(contents)) < segmentHeaderSize {
+		return fmt.Errorf("read WAL segment header %q: %w", path, io.ErrUnexpectedEOF)
+	}
+	if string(contents[:len(segmentMagic)]) != segmentMagic {
+		return fmt.Errorf("WAL segment %q has invalid magic", path)
+	}
+	if version := binary.BigEndian.Uint32(contents[len(segmentMagic):segmentHeaderSize]); version != formatVersion {
+		return fmt.Errorf("WAL segment %q has unsupported format version %d", path, version)
+	}
+	for offset := segmentHeaderSize; offset < int64(len(contents)); {
+		if int64(len(contents))-offset < frameHeaderSize {
+			if tolerateInterruptedTail {
+				return nil
+			}
+			return fmt.Errorf("read WAL segment %q byte offset %d frame header: %w", path, offset, io.ErrUnexpectedEOF)
+		}
+		length := binary.BigEndian.Uint32(contents[offset : offset+4])
+		if length == 0 || length > maxRecordSize {
+			return fmt.Errorf("WAL segment %q byte offset %d has invalid frame length %d", path, offset, length)
+		}
+		end := offset + frameHeaderSize + int64(length)
+		if end > int64(len(contents)) {
+			if tolerateInterruptedTail {
+				return nil
+			}
+			return fmt.Errorf("read WAL segment %q byte offset %d frame body: %w", path, offset, io.ErrUnexpectedEOF)
+		}
+		body := contents[offset+frameHeaderSize : end]
+		want := binary.BigEndian.Uint32(contents[offset+4 : offset+8])
+		if got := crc32.ChecksumIEEE(body); got != want {
+			if tolerateInterruptedTail && end == int64(len(contents)) {
+				return nil
+			}
+			return fmt.Errorf("WAL segment %q byte offset %d frame checksum mismatch: got %08x, want %08x", path, offset, got, want)
+		}
+		if err := visit(recordType(body[0]), body[1:]); err != nil {
+			return err
+		}
+		offset = end
+	}
+	return nil
+}
+
+func syncDirectory(directory string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
 }

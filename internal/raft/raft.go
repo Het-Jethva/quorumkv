@@ -381,6 +381,7 @@ type RecoveredState struct {
 	Log           []LogEntry
 	CommitIndex   uint64
 	SnapshotIndex uint64
+	SnapshotTerm  uint64
 }
 
 type pendingHardStatePersistence struct {
@@ -434,6 +435,8 @@ type Node struct {
 	lastLogIndex    uint64
 	lastLogTerm     uint64
 	durableLogIndex uint64
+	logBaseIndex    uint64
+	logBaseTerm     uint64
 	log             []LogEntry
 	commitIndex     uint64
 	lastApplied     uint64
@@ -484,6 +487,14 @@ func NewNodeWithLog(id NodeID, peers []NodeID, hardState HardState, entries []Lo
 // NewNodeFromRecoveredState creates a Follower whose durable committed prefix
 // will be applied only when the runtime delivers RecoverCommitted.
 func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredState) *Node {
+	if recovered.SnapshotIndex > 0 && len(recovered.Log) > 0 && recovered.Log[0].Index == 1 {
+		if recovered.SnapshotIndex <= uint64(len(recovered.Log)) {
+			if recovered.SnapshotTerm == 0 {
+				recovered.SnapshotTerm = recovered.Log[recovered.SnapshotIndex-1].Term
+			}
+			recovered.Log = recovered.Log[recovered.SnapshotIndex:]
+		}
+	}
 	orderedPeers := append([]NodeID(nil), peers...)
 	sort.Slice(orderedPeers, func(i, j int) bool { return orderedPeers[i] < orderedPeers[j] })
 	node := &Node{
@@ -497,6 +508,11 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		commitIndex:        recovered.CommitIndex,
 		durableCommitIndex: recovered.CommitIndex,
 		lastApplied:        recovered.SnapshotIndex,
+		logBaseIndex:       recovered.SnapshotIndex,
+		logBaseTerm:        recovered.SnapshotTerm,
+		lastLogIndex:       recovered.SnapshotIndex,
+		lastLogTerm:        recovered.SnapshotTerm,
+		durableLogIndex:    recovered.SnapshotIndex,
 		votes:              make(map[NodeID]struct{}),
 		preVotes:           make(map[NodeID]struct{}),
 		activePeers:        make(map[NodeID]struct{}),
@@ -521,7 +537,7 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 func (n *Node) State() State {
 	var lastAppliedTerm uint64
 	if n.lastApplied > 0 {
-		lastAppliedTerm = n.log[n.lastApplied-1].Term
+		lastAppliedTerm = n.termAt(n.lastApplied)
 	}
 	return State{
 		ID:              n.id,
@@ -841,6 +857,11 @@ func (n *Node) sendAppendEntriesTo(peer NodeID, readID ReadID) []Action {
 	if nextIndex == 0 || nextIndex > durableLastIndex+1 {
 		nextIndex = durableLastIndex + 1
 	}
+	// A peer behind the compacted prefix requires InstallSnapshot, which is
+	// emitted by the Snapshot-transfer slice rather than fabricating log data.
+	if nextIndex <= n.logBaseIndex {
+		return nil
+	}
 	prevIndex := nextIndex - 1
 	n.nextRequestID++
 	request := AppendEntries{
@@ -1090,27 +1111,36 @@ func (n *Node) matches(index, term uint64) bool {
 }
 
 func (n *Node) termAt(index uint64) uint64 {
-	if index == 0 || index > uint64(len(n.log)) {
+	if index == n.logBaseIndex {
+		return n.logBaseTerm
+	}
+	if index <= n.logBaseIndex || index > n.lastLogIndex {
 		return 0
 	}
-	return n.log[index-1].Term
+	return n.log[index-n.logBaseIndex-1].Term
 }
 
 func (n *Node) entriesBatch(first, last uint64) []LogEntry {
 	if first == 0 || first > last || last > n.lastLogIndex {
 		return nil
 	}
+	if first <= n.logBaseIndex {
+		return nil
+	}
 	bytes := 0
 	end := first - 1
 	for index := first; index <= last; index++ {
-		entryBytes := 64 + len(n.log[index-1].Key) + len(n.log[index-1].Value)
+		entry := n.log[index-n.logBaseIndex-1]
+		entryBytes := 64 + len(entry.Key) + len(entry.Value)
 		if bytes+entryBytes > maxAppendEntriesBytes && end >= first {
 			break
 		}
 		bytes += entryBytes
 		end = index
 	}
-	return cloneLogEntries(n.log[first-1 : end])
+	startOffset := first - n.logBaseIndex - 1
+	endOffset := end - n.logBaseIndex
+	return cloneLogEntries(n.log[startOffset:endOffset])
 }
 
 func (n *Node) conflictHint(index uint64) (uint64, uint64) {
@@ -1119,7 +1149,7 @@ func (n *Node) conflictHint(index uint64) (uint64, uint64) {
 	}
 	term := n.termAt(index)
 	first := index
-	for first > 1 && n.termAt(first-1) == term {
+	for first > n.logBaseIndex+1 && n.termAt(first-1) == term {
 		first--
 	}
 	return term, first
@@ -1179,7 +1209,7 @@ func (n *Node) entriesToAppend(prevIndex uint64, entries []LogEntry) ([]LogEntry
 }
 
 func (n *Node) truncateLog(firstIndex uint64) {
-	n.log = n.log[:firstIndex-1]
+	n.log = n.log[:firstIndex-n.logBaseIndex-1]
 	n.lastLogIndex = firstIndex - 1
 	n.lastLogTerm = n.termAt(n.lastLogIndex)
 	n.durableLogIndex = min(n.durableLogIndex, n.lastLogIndex)
@@ -1229,7 +1259,7 @@ func (n *Node) applyThrough(index uint64) []Action {
 	actions := make([]Action, 0, index-n.lastApplied+1)
 	for n.lastApplied < index {
 		n.lastApplied++
-		entry := n.log[n.lastApplied-1]
+		entry := n.log[n.lastApplied-n.logBaseIndex-1]
 		actions = append(actions, ApplyEntry{Entry: entry})
 		if n.role == Leader && !n.readReady && entry.Type == EntryNoOp && entry.Term == n.term {
 			n.readReady = true

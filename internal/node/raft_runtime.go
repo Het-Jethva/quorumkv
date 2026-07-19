@@ -42,17 +42,26 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 		logTerms[index] = entry.Term
 	}
 	recoveredSnapshot, err := snapshot.LoadNewest(cfg.Node.DataDir, snapshot.Compatibility{
-		Identity:    identity,
-		CommitIndex: recovered.CommitIndex,
-		LogTerms:    logTerms,
+		Identity:      identity,
+		CommitIndex:   recovered.CommitIndex,
+		LogStartIndex: recovered.SnapshotIndex + 1,
+		LogTerms:      logTerms,
+		SnapshotIndex: recovered.SnapshotIndex,
+		SnapshotTerm:  recovered.SnapshotTerm,
 	})
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("recover Node %q Snapshot: %w", cfg.Node.ID, err)
 	}
-	var snapshotIndex uint64
+	var snapshotIndex, snapshotTerm uint64
 	if recoveredSnapshot != nil {
 		snapshotIndex = recoveredSnapshot.IncludedIndex
+		snapshotTerm = recoveredSnapshot.IncludedTerm
+		firstSuffixEntry := 0
+		for firstSuffixEntry < len(logEntries) && logEntries[firstSuffixEntry].Index <= snapshotIndex {
+			firstSuffixEntry++
+		}
+		logEntries = logEntries[firstSuffixEntry:]
 	}
 	core := raft.NewNodeFromRecoveredState(raft.NodeID(cfg.Node.ID), peers, raft.RecoveredState{
 		HardState: raft.HardState{
@@ -62,6 +71,7 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 		Log:           logEntries,
 		CommitIndex:   recovered.CommitIndex,
 		SnapshotIndex: snapshotIndex,
+		SnapshotTerm:  snapshotTerm,
 	})
 	return &raftRuntime{core: core, wal: store, recoveredSnapshot: recoveredSnapshot}, nil
 }
