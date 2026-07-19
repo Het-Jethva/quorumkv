@@ -1041,6 +1041,10 @@ type GetStatusResponse struct {
 	Role          RaftRole               `protobuf:"varint,6,opt,name=role,proto3,enum=quorumkv.v1.RaftRole" json:"role,omitempty"`
 	LeaderId      string                 `protobuf:"bytes,7,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
 	Term          uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
+	LastLogIndex  uint64                 `protobuf:"varint,9,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	CommitIndex   uint64                 `protobuf:"varint,10,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
+	LastApplied   uint64                 `protobuf:"varint,11,opt,name=last_applied,json=lastApplied,proto3" json:"last_applied,omitempty"`
+	SnapshotIndex uint64                 `protobuf:"varint,12,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1127,6 +1131,34 @@ func (x *GetStatusResponse) GetLeaderId() string {
 func (x *GetStatusResponse) GetTerm() uint64 {
 	if x != nil {
 		return x.Term
+	}
+	return 0
+}
+
+func (x *GetStatusResponse) GetLastLogIndex() uint64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *GetStatusResponse) GetCommitIndex() uint64 {
+	if x != nil {
+		return x.CommitIndex
+	}
+	return 0
+}
+
+func (x *GetStatusResponse) GetLastApplied() uint64 {
+	if x != nil {
+		return x.LastApplied
+	}
+	return 0
+}
+
+func (x *GetStatusResponse) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
 	}
 	return 0
 }
@@ -2271,7 +2303,7 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\rnext_sequence\x18\x02 \x01(\x04R\fnextSequence\"O\n" +
 	"\tNotLeader\x12\x1b\n" +
 	"\tleader_id\x18\x01 \x01(\tR\bleaderId\x12%\n" +
-	"\x0eleader_address\x18\x02 \x01(\tR\rleaderAddress\"\x9f\x02\n" +
+	"\x0eleader_address\x18\x02 \x01(\tR\rleaderAddress\"\xb2\x03\n" +
 	"\x11GetStatusResponse\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\x17\n" +
@@ -2281,7 +2313,12 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\x0eclient_address\x18\x05 \x01(\tR\rclientAddress\x12)\n" +
 	"\x04role\x18\x06 \x01(\x0e2\x15.quorumkv.v1.RaftRoleR\x04role\x12\x1b\n" +
 	"\tleader_id\x18\a \x01(\tR\bleaderId\x12\x12\n" +
-	"\x04term\x18\b \x01(\x04R\x04term\"\xcd\x01\n" +
+	"\x04term\x18\b \x01(\x04R\x04term\x12$\n" +
+	"\x0elast_log_index\x18\t \x01(\x04R\flastLogIndex\x12!\n" +
+	"\fcommit_index\x18\n" +
+	" \x01(\x04R\vcommitIndex\x12!\n" +
+	"\flast_applied\x18\v \x01(\x04R\vlastApplied\x12%\n" +
+	"\x0esnapshot_index\x18\f \x01(\x04R\rsnapshotIndex\"\xcd\x01\n" +
 	"\x10HandshakeRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +

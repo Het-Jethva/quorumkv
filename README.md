@@ -22,6 +22,8 @@ The client endpoint implements the versioned `quorumkv.v1.NodeService` status AP
 
 Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available. Peer handshakes fail closed on protocol, Cluster Identity, or Node Identity mismatches.
 
+`GetStatus` is explicitly a local observation: it reports role, known Leader, Term, last-log, commit, applied, and Snapshot positions. Set `node.metrics_address` to expose a local Prometheus text endpoint at `/metrics`; it reports RPCs, elections, Raft RPCs, proposals, client errors/retries, WAL syncs, commit latency, and Snapshot installation/compaction counters. The endpoint makes no claim about Cluster health and never includes Values or secrets. JSON logs include Node Identity, Term, role, Leader, and log positions.
+
 Each Node automatically creates a Snapshot after retained committed-and-applied WAL entry frames reach `snapshot_threshold_bytes` (64 MiB when omitted). Snapshot file encoding and syncing run from an immutable apply-loop clone, so later commands continue while one Snapshot is in progress. Covered complete WAL segments are removed only after the Snapshot and a recovery checkpoint are durable. Tests and demos can also call `Node.CreateSnapshot` to trigger the same path manually.
 
 The Node stops gracefully when its context is canceled or it receives `SIGINT`/`SIGTERM`.

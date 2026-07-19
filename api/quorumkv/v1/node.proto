@@ -116,6 +116,10 @@ message GetStatusResponse {
   RaftRole role = 6;
   string leader_id = 7;
   uint64 term = 8;
+  uint64 last_log_index = 9;
+  uint64 commit_index = 10;
+  uint64 last_applied = 11;
+  uint64 snapshot_index = 12;
 }
 
 enum NodeState {

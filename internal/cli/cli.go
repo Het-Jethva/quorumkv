@@ -66,7 +66,16 @@ func Run(args []string, output io.Writer) error {
 		Role          string `json:"role"`
 		LeaderID      string `json:"leader_id,omitempty"`
 		Term          uint64 `json:"term"`
-	}{status.ClusterId, status.NodeId, status.State.String(), status.PeerAddress, status.ClientAddress, status.Role.String(), status.LeaderId, status.Term}
+		LastLogIndex  uint64 `json:"last_log_index"`
+		CommitIndex   uint64 `json:"commit_index"`
+		LastApplied   uint64 `json:"last_applied"`
+		SnapshotIndex uint64 `json:"snapshot_index"`
+	}{
+		ClusterID: status.ClusterId, NodeID: status.NodeId, State: status.State.String(),
+		PeerAddress: status.PeerAddress, ClientAddress: status.ClientAddress, Role: status.Role.String(),
+		LeaderID: status.LeaderId, Term: status.Term, LastLogIndex: status.LastLogIndex,
+		CommitIndex: status.CommitIndex, LastApplied: status.LastApplied, SnapshotIndex: status.SnapshotIndex,
+	}
 	if err := json.NewEncoder(output).Encode(result); err != nil {
 		return fmt.Errorf("write status: %w", err)
 	}
