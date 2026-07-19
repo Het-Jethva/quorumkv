@@ -3,11 +3,13 @@ package node
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
 	"hash/fnv"
 	"math/rand"
 	"time"
 
 	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/snapshot"
 )
 
 const (
@@ -49,6 +51,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 
 	type snapshotCompletion struct {
 		index uint64
+		term  uint64
 		err   error
 	}
 	snapshotDone := make(chan snapshotCompletion, 1)
@@ -73,6 +76,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		go func() {
 			snapshotDone <- snapshotCompletion{
 				index: captured.IncludedIndex,
+				term:  captured.IncludedTerm,
 				err:   installSnapshot(n.config.Node.DataDir, captured, runtime.wal),
 			}
 		}()
@@ -106,6 +110,12 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		ctx    context.Context
 		key    string
 	}
+	type incomingSnapshot struct {
+		index, term, length uint64
+		checksum            uint32
+		data                []byte
+	}
+	var incoming *incomingSnapshot
 	pending := make(map[uint64][]pendingProposal)
 	inFlightMutations := make(map[raft.SessionID]inFlightMutation)
 	pendingReads := make(map[raft.ReadID]pendingRead)
@@ -145,6 +155,12 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			if completion.err != nil && wasAutomatic {
 				return fmt.Errorf("automatic Snapshot: %w", completion.err)
 			}
+			if completion.err == nil {
+				if _, err := runtime.step(raft.SnapshotCompacted{Index: completion.index, Term: completion.term}); err != nil {
+					return err
+				}
+				n.publishRaftState(runtime.core.State())
+			}
 			continue
 		case input := <-n.events:
 			if input.snapshotResult != nil {
@@ -162,6 +178,42 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			event = raft.HeartbeatTimeout{}
 		case <-quorumC:
 			event = raft.CheckQuorumTimeout{}
+		}
+		if request, ok := event.(raft.InstallSnapshot); ok {
+			if request.Offset == 0 {
+				incoming = &incomingSnapshot{index: request.SnapshotIndex, term: request.SnapshotTerm, length: request.Length, checksum: request.Checksum}
+			}
+			if incoming == nil || incoming.index != request.SnapshotIndex || incoming.term != request.SnapshotTerm || incoming.length != request.Length || incoming.checksum != request.Checksum || request.Offset != uint64(len(incoming.data)) || request.Offset+uint64(len(request.Data)) > incoming.length {
+				request.Success = false
+				request.NextOffset = 0
+			} else {
+				incoming.data = append(incoming.data, request.Data...)
+				request.Success = true
+				request.NextOffset = uint64(len(incoming.data))
+				if request.Done {
+					valid := uint64(len(incoming.data)) == incoming.length && crc32.ChecksumIEEE(incoming.data) == incoming.checksum
+					state, decodeErr := snapshot.Decode(incoming.data)
+					valid = valid && decodeErr == nil && state.IncludedIndex == incoming.index && state.IncludedTerm == incoming.term && snapshotClusterMatches(state.Identity, snapshotIdentity(n.config))
+					if valid {
+						state.Identity = snapshotIdentity(n.config)
+						if _, err := snapshot.Save(n.config.Node.DataDir, *state); err != nil {
+							return fmt.Errorf("install received Snapshot file: %w", err)
+						}
+						if err := runtime.wal.InstallSnapshot(state.IncludedIndex, state.IncludedTerm); err != nil {
+							return fmt.Errorf("persist received Snapshot: %w", err)
+						}
+						if err := sessions.restore(state); err != nil {
+							return fmt.Errorf("restore received Snapshot: %w", err)
+						}
+						request.Installed = true
+					} else {
+						request.Success = false
+						request.NextOffset = 0
+					}
+					incoming = nil
+				}
+			}
+			event = request
 		}
 		if read, ok := event.(raft.ConfirmRead); ok && readResults != nil {
 			pendingReads[read.ReadID] = pendingRead{result: readResults, ctx: proposalContext, key: readKey}
@@ -191,20 +243,29 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		for _, action := range actions {
 			switch action := action.(type) {
 			case raft.SendPreVoteRequest, raft.SendPreVoteResponse, raft.SendVoteRequest,
-				raft.SendVoteResponse, raft.SendAppendEntries, raft.SendAppendEntriesResponse:
+				raft.SendVoteResponse, raft.SendAppendEntries, raft.SendAppendEntriesResponse,
+				raft.SendInstallSnapshot, raft.SendInstallSnapshotResponse:
 				// A missing peer is ordinary during startup, elections, and process loss.
 				// The next timer or inbound message retries protocol progress.
 				if err := transport.send(ctx, action); err != nil {
 					if isPeerConfigurationError(err) {
 						return err
 					}
-					if appendAction, ok := action.(raft.SendAppendEntries); ok {
-						failed, stepErr := runtime.step(raft.AppendEntriesFailed{To: appendAction.To, RequestID: appendAction.Request.RequestID})
+					var failedTo raft.NodeID
+					var failedRequest uint64
+					switch sent := action.(type) {
+					case raft.SendAppendEntries:
+						failedTo, failedRequest = sent.To, sent.Request.RequestID
+					case raft.SendInstallSnapshot:
+						failedTo, failedRequest = sent.To, sent.RequestID
+					}
+					if failedRequest != 0 {
+						failed, stepErr := runtime.step(raft.AppendEntriesFailed{To: failedTo, RequestID: failedRequest})
 						if stepErr != nil {
 							return stepErr
 						}
 						if len(failed) != 0 {
-							return fmt.Errorf("report failed AppendEntries delivery: unexpected Raft actions %T", failed[0])
+							return fmt.Errorf("report failed replication delivery: unexpected Raft actions %T", failed[0])
 						}
 					}
 				}

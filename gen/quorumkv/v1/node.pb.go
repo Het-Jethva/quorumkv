@@ -1289,6 +1289,8 @@ type SendRequest struct {
 	//	*SendRequest_VoteResponse
 	//	*SendRequest_AppendEntriesRequest
 	//	*SendRequest_AppendEntriesResponse
+	//	*SendRequest_InstallSnapshotRequest
+	//	*SendRequest_InstallSnapshotResponse
 	Message       isSendRequest_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1413,6 +1415,24 @@ func (x *SendRequest) GetAppendEntriesResponse() *AppendEntriesResponse {
 	return nil
 }
 
+func (x *SendRequest) GetInstallSnapshotRequest() *InstallSnapshotRequest {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_InstallSnapshotRequest); ok {
+			return x.InstallSnapshotRequest
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetInstallSnapshotResponse() *InstallSnapshotResponse {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_InstallSnapshotResponse); ok {
+			return x.InstallSnapshotResponse
+		}
+	}
+	return nil
+}
+
 type isSendRequest_Message interface {
 	isSendRequest_Message()
 }
@@ -1441,6 +1461,14 @@ type SendRequest_AppendEntriesResponse struct {
 	AppendEntriesResponse *AppendEntriesResponse `protobuf:"bytes,10,opt,name=append_entries_response,json=appendEntriesResponse,proto3,oneof"`
 }
 
+type SendRequest_InstallSnapshotRequest struct {
+	InstallSnapshotRequest *InstallSnapshotRequest `protobuf:"bytes,11,opt,name=install_snapshot_request,json=installSnapshotRequest,proto3,oneof"`
+}
+
+type SendRequest_InstallSnapshotResponse struct {
+	InstallSnapshotResponse *InstallSnapshotResponse `protobuf:"bytes,12,opt,name=install_snapshot_response,json=installSnapshotResponse,proto3,oneof"`
+}
+
 func (*SendRequest_PreVoteRequest) isSendRequest_Message() {}
 
 func (*SendRequest_PreVoteResponse) isSendRequest_Message() {}
@@ -1452,6 +1480,10 @@ func (*SendRequest_VoteResponse) isSendRequest_Message() {}
 func (*SendRequest_AppendEntriesRequest) isSendRequest_Message() {}
 
 func (*SendRequest_AppendEntriesResponse) isSendRequest_Message() {}
+
+func (*SendRequest_InstallSnapshotRequest) isSendRequest_Message() {}
+
+func (*SendRequest_InstallSnapshotResponse) isSendRequest_Message() {}
 
 type SendResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1905,6 +1937,198 @@ func (x *AppendEntriesResponse) GetConflictIndex() uint64 {
 	return 0
 }
 
+type InstallSnapshotRequest struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Term             uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	RequestId        uint64                 `protobuf:"varint,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	SnapshotIndex    uint64                 `protobuf:"varint,3,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	SnapshotTerm     uint64                 `protobuf:"varint,4,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
+	SnapshotLength   uint64                 `protobuf:"varint,5,opt,name=snapshot_length,json=snapshotLength,proto3" json:"snapshot_length,omitempty"`
+	SnapshotChecksum uint32                 `protobuf:"varint,6,opt,name=snapshot_checksum,json=snapshotChecksum,proto3" json:"snapshot_checksum,omitempty"`
+	Offset           uint64                 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`
+	Data             []byte                 `protobuf:"bytes,8,opt,name=data,proto3" json:"data,omitempty"`
+	Done             bool                   `protobuf:"varint,9,opt,name=done,proto3" json:"done,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotRequest) Reset() {
+	*x = InstallSnapshotRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotRequest) ProtoMessage() {}
+
+func (x *InstallSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *InstallSnapshotRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapshotTerm() uint64 {
+	if x != nil {
+		return x.SnapshotTerm
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapshotLength() uint64 {
+	if x != nil {
+		return x.SnapshotLength
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapshotChecksum() uint32 {
+	if x != nil {
+		return x.SnapshotChecksum
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *InstallSnapshotRequest) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
+type InstallSnapshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	RequestId     uint64                 `protobuf:"varint,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Success       bool                   `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`
+	NextOffset    uint64                 `protobuf:"varint,4,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
+	SnapshotIndex uint64                 `protobuf:"varint,5,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	Done          bool                   `protobuf:"varint,6,opt,name=done,proto3" json:"done,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotResponse) Reset() {
+	*x = InstallSnapshotResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotResponse) ProtoMessage() {}
+
+func (x *InstallSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *InstallSnapshotResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotResponse) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *InstallSnapshotResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *InstallSnapshotResponse) GetNextOffset() uint64 {
+	if x != nil {
+		return x.NextOffset
+	}
+	return 0
+}
+
+func (x *InstallSnapshotResponse) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *InstallSnapshotResponse) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
 type RaftLogEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
@@ -1920,7 +2144,7 @@ type RaftLogEntry struct {
 
 func (x *RaftLogEntry) Reset() {
 	*x = RaftLogEntry{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[28]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1932,7 +2156,7 @@ func (x *RaftLogEntry) String() string {
 func (*RaftLogEntry) ProtoMessage() {}
 
 func (x *RaftLogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[28]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1945,7 +2169,7 @@ func (x *RaftLogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftLogEntry.ProtoReflect.Descriptor instead.
 func (*RaftLogEntry) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{28}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *RaftLogEntry) GetIndex() uint64 {
@@ -2070,7 +2294,7 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"cluster_id\x18\x02 \x01(\tR\tclusterId\x12\x17\n" +
 	"\anode_id\x18\x03 \x01(\tR\x06nodeId\x120\n" +
-	"\x14active_session_limit\x18\x04 \x01(\rR\x12activeSessionLimit\"\xf1\x04\n" +
+	"\x14active_session_limit\x18\x04 \x01(\rR\x12activeSessionLimit\"\xb6\x06\n" +
 	"\vSendRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -2085,7 +2309,9 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\rvote_response\x18\b \x01(\v2\x19.quorumkv.v1.VoteResponseH\x00R\fvoteResponse\x12Y\n" +
 	"\x16append_entries_request\x18\t \x01(\v2!.quorumkv.v1.AppendEntriesRequestH\x00R\x14appendEntriesRequest\x12\\\n" +
 	"\x17append_entries_response\x18\n" +
-	" \x01(\v2\".quorumkv.v1.AppendEntriesResponseH\x00R\x15appendEntriesResponseB\t\n" +
+	" \x01(\v2\".quorumkv.v1.AppendEntriesResponseH\x00R\x15appendEntriesResponse\x12_\n" +
+	"\x18install_snapshot_request\x18\v \x01(\v2#.quorumkv.v1.InstallSnapshotRequestH\x00R\x16installSnapshotRequest\x12b\n" +
+	"\x19install_snapshot_response\x18\f \x01(\v2$.quorumkv.v1.InstallSnapshotResponseH\x00R\x17installSnapshotResponseB\t\n" +
 	"\amessage\"\x0e\n" +
 	"\fSendResponse\"n\n" +
 	"\x0ePreVoteRequest\x12\x12\n" +
@@ -2121,7 +2347,27 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x05 \x01(\x04R\trequestId\x12#\n" +
 	"\rconflict_term\x18\x06 \x01(\x04R\fconflictTerm\x12%\n" +
-	"\x0econflict_index\x18\a \x01(\x04R\rconflictIndex\"\xcb\x01\n" +
+	"\x0econflict_index\x18\a \x01(\x04R\rconflictIndex\"\xad\x02\n" +
+	"\x16InstallSnapshotRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\x04R\trequestId\x12%\n" +
+	"\x0esnapshot_index\x18\x03 \x01(\x04R\rsnapshotIndex\x12#\n" +
+	"\rsnapshot_term\x18\x04 \x01(\x04R\fsnapshotTerm\x12'\n" +
+	"\x0fsnapshot_length\x18\x05 \x01(\x04R\x0esnapshotLength\x12+\n" +
+	"\x11snapshot_checksum\x18\x06 \x01(\rR\x10snapshotChecksum\x12\x16\n" +
+	"\x06offset\x18\a \x01(\x04R\x06offset\x12\x12\n" +
+	"\x04data\x18\b \x01(\fR\x04data\x12\x12\n" +
+	"\x04done\x18\t \x01(\bR\x04done\"\xc2\x01\n" +
+	"\x17InstallSnapshotResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\x04R\trequestId\x12\x18\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\x12\x1f\n" +
+	"\vnext_offset\x18\x04 \x01(\x04R\n" +
+	"nextOffset\x12%\n" +
+	"\x0esnapshot_index\x18\x05 \x01(\x04R\rsnapshotIndex\x12\x12\n" +
+	"\x04done\x18\x06 \x01(\bR\x04done\"\xcb\x01\n" +
 	"\fRaftLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12.\n" +
@@ -2177,41 +2423,43 @@ func file_quorumkv_v1_node_proto_rawDescGZIP() []byte {
 }
 
 var file_quorumkv_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_quorumkv_v1_node_proto_goTypes = []any{
-	(InvalidSessionReason)(0),     // 0: quorumkv.v1.InvalidSessionReason
-	(NodeState)(0),                // 1: quorumkv.v1.NodeState
-	(RaftRole)(0),                 // 2: quorumkv.v1.RaftRole
-	(RaftEntryType)(0),            // 3: quorumkv.v1.RaftEntryType
-	(*GetStatusRequest)(nil),      // 4: quorumkv.v1.GetStatusRequest
-	(*OpenSessionRequest)(nil),    // 5: quorumkv.v1.OpenSessionRequest
-	(*OpenSessionResponse)(nil),   // 6: quorumkv.v1.OpenSessionResponse
-	(*CloseSessionRequest)(nil),   // 7: quorumkv.v1.CloseSessionRequest
-	(*CloseSessionResponse)(nil),  // 8: quorumkv.v1.CloseSessionResponse
-	(*SetRequest)(nil),            // 9: quorumkv.v1.SetRequest
-	(*SetResponse)(nil),           // 10: quorumkv.v1.SetResponse
-	(*GetRequest)(nil),            // 11: quorumkv.v1.GetRequest
-	(*GetResponse)(nil),           // 12: quorumkv.v1.GetResponse
-	(*DeleteRequest)(nil),         // 13: quorumkv.v1.DeleteRequest
-	(*DeleteResponse)(nil),        // 14: quorumkv.v1.DeleteResponse
-	(*ValidationError)(nil),       // 15: quorumkv.v1.ValidationError
-	(*KeyNotFound)(nil),           // 16: quorumkv.v1.KeyNotFound
-	(*InvalidSession)(nil),        // 17: quorumkv.v1.InvalidSession
-	(*StaleSequence)(nil),         // 18: quorumkv.v1.StaleSequence
-	(*OutOfOrderSequence)(nil),    // 19: quorumkv.v1.OutOfOrderSequence
-	(*NotLeader)(nil),             // 20: quorumkv.v1.NotLeader
-	(*GetStatusResponse)(nil),     // 21: quorumkv.v1.GetStatusResponse
-	(*HandshakeRequest)(nil),      // 22: quorumkv.v1.HandshakeRequest
-	(*HandshakeResponse)(nil),     // 23: quorumkv.v1.HandshakeResponse
-	(*SendRequest)(nil),           // 24: quorumkv.v1.SendRequest
-	(*SendResponse)(nil),          // 25: quorumkv.v1.SendResponse
-	(*PreVoteRequest)(nil),        // 26: quorumkv.v1.PreVoteRequest
-	(*PreVoteResponse)(nil),       // 27: quorumkv.v1.PreVoteResponse
-	(*VoteRequest)(nil),           // 28: quorumkv.v1.VoteRequest
-	(*VoteResponse)(nil),          // 29: quorumkv.v1.VoteResponse
-	(*AppendEntriesRequest)(nil),  // 30: quorumkv.v1.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil), // 31: quorumkv.v1.AppendEntriesResponse
-	(*RaftLogEntry)(nil),          // 32: quorumkv.v1.RaftLogEntry
+	(InvalidSessionReason)(0),       // 0: quorumkv.v1.InvalidSessionReason
+	(NodeState)(0),                  // 1: quorumkv.v1.NodeState
+	(RaftRole)(0),                   // 2: quorumkv.v1.RaftRole
+	(RaftEntryType)(0),              // 3: quorumkv.v1.RaftEntryType
+	(*GetStatusRequest)(nil),        // 4: quorumkv.v1.GetStatusRequest
+	(*OpenSessionRequest)(nil),      // 5: quorumkv.v1.OpenSessionRequest
+	(*OpenSessionResponse)(nil),     // 6: quorumkv.v1.OpenSessionResponse
+	(*CloseSessionRequest)(nil),     // 7: quorumkv.v1.CloseSessionRequest
+	(*CloseSessionResponse)(nil),    // 8: quorumkv.v1.CloseSessionResponse
+	(*SetRequest)(nil),              // 9: quorumkv.v1.SetRequest
+	(*SetResponse)(nil),             // 10: quorumkv.v1.SetResponse
+	(*GetRequest)(nil),              // 11: quorumkv.v1.GetRequest
+	(*GetResponse)(nil),             // 12: quorumkv.v1.GetResponse
+	(*DeleteRequest)(nil),           // 13: quorumkv.v1.DeleteRequest
+	(*DeleteResponse)(nil),          // 14: quorumkv.v1.DeleteResponse
+	(*ValidationError)(nil),         // 15: quorumkv.v1.ValidationError
+	(*KeyNotFound)(nil),             // 16: quorumkv.v1.KeyNotFound
+	(*InvalidSession)(nil),          // 17: quorumkv.v1.InvalidSession
+	(*StaleSequence)(nil),           // 18: quorumkv.v1.StaleSequence
+	(*OutOfOrderSequence)(nil),      // 19: quorumkv.v1.OutOfOrderSequence
+	(*NotLeader)(nil),               // 20: quorumkv.v1.NotLeader
+	(*GetStatusResponse)(nil),       // 21: quorumkv.v1.GetStatusResponse
+	(*HandshakeRequest)(nil),        // 22: quorumkv.v1.HandshakeRequest
+	(*HandshakeResponse)(nil),       // 23: quorumkv.v1.HandshakeResponse
+	(*SendRequest)(nil),             // 24: quorumkv.v1.SendRequest
+	(*SendResponse)(nil),            // 25: quorumkv.v1.SendResponse
+	(*PreVoteRequest)(nil),          // 26: quorumkv.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),         // 27: quorumkv.v1.PreVoteResponse
+	(*VoteRequest)(nil),             // 28: quorumkv.v1.VoteRequest
+	(*VoteResponse)(nil),            // 29: quorumkv.v1.VoteResponse
+	(*AppendEntriesRequest)(nil),    // 30: quorumkv.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),   // 31: quorumkv.v1.AppendEntriesResponse
+	(*InstallSnapshotRequest)(nil),  // 32: quorumkv.v1.InstallSnapshotRequest
+	(*InstallSnapshotResponse)(nil), // 33: quorumkv.v1.InstallSnapshotResponse
+	(*RaftLogEntry)(nil),            // 34: quorumkv.v1.RaftLogEntry
 }
 var file_quorumkv_v1_node_proto_depIdxs = []int32{
 	0,  // 0: quorumkv.v1.InvalidSession.reason:type_name -> quorumkv.v1.InvalidSessionReason
@@ -2223,29 +2471,31 @@ var file_quorumkv_v1_node_proto_depIdxs = []int32{
 	29, // 6: quorumkv.v1.SendRequest.vote_response:type_name -> quorumkv.v1.VoteResponse
 	30, // 7: quorumkv.v1.SendRequest.append_entries_request:type_name -> quorumkv.v1.AppendEntriesRequest
 	31, // 8: quorumkv.v1.SendRequest.append_entries_response:type_name -> quorumkv.v1.AppendEntriesResponse
-	32, // 9: quorumkv.v1.AppendEntriesRequest.entries:type_name -> quorumkv.v1.RaftLogEntry
-	3,  // 10: quorumkv.v1.RaftLogEntry.type:type_name -> quorumkv.v1.RaftEntryType
-	4,  // 11: quorumkv.v1.NodeService.GetStatus:input_type -> quorumkv.v1.GetStatusRequest
-	5,  // 12: quorumkv.v1.ClientService.OpenSession:input_type -> quorumkv.v1.OpenSessionRequest
-	7,  // 13: quorumkv.v1.ClientService.CloseSession:input_type -> quorumkv.v1.CloseSessionRequest
-	9,  // 14: quorumkv.v1.ClientService.Set:input_type -> quorumkv.v1.SetRequest
-	11, // 15: quorumkv.v1.ClientService.Get:input_type -> quorumkv.v1.GetRequest
-	13, // 16: quorumkv.v1.ClientService.Delete:input_type -> quorumkv.v1.DeleteRequest
-	22, // 17: quorumkv.v1.PeerService.Handshake:input_type -> quorumkv.v1.HandshakeRequest
-	24, // 18: quorumkv.v1.PeerService.Send:input_type -> quorumkv.v1.SendRequest
-	21, // 19: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
-	6,  // 20: quorumkv.v1.ClientService.OpenSession:output_type -> quorumkv.v1.OpenSessionResponse
-	8,  // 21: quorumkv.v1.ClientService.CloseSession:output_type -> quorumkv.v1.CloseSessionResponse
-	10, // 22: quorumkv.v1.ClientService.Set:output_type -> quorumkv.v1.SetResponse
-	12, // 23: quorumkv.v1.ClientService.Get:output_type -> quorumkv.v1.GetResponse
-	14, // 24: quorumkv.v1.ClientService.Delete:output_type -> quorumkv.v1.DeleteResponse
-	23, // 25: quorumkv.v1.PeerService.Handshake:output_type -> quorumkv.v1.HandshakeResponse
-	25, // 26: quorumkv.v1.PeerService.Send:output_type -> quorumkv.v1.SendResponse
-	19, // [19:27] is the sub-list for method output_type
-	11, // [11:19] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	32, // 9: quorumkv.v1.SendRequest.install_snapshot_request:type_name -> quorumkv.v1.InstallSnapshotRequest
+	33, // 10: quorumkv.v1.SendRequest.install_snapshot_response:type_name -> quorumkv.v1.InstallSnapshotResponse
+	34, // 11: quorumkv.v1.AppendEntriesRequest.entries:type_name -> quorumkv.v1.RaftLogEntry
+	3,  // 12: quorumkv.v1.RaftLogEntry.type:type_name -> quorumkv.v1.RaftEntryType
+	4,  // 13: quorumkv.v1.NodeService.GetStatus:input_type -> quorumkv.v1.GetStatusRequest
+	5,  // 14: quorumkv.v1.ClientService.OpenSession:input_type -> quorumkv.v1.OpenSessionRequest
+	7,  // 15: quorumkv.v1.ClientService.CloseSession:input_type -> quorumkv.v1.CloseSessionRequest
+	9,  // 16: quorumkv.v1.ClientService.Set:input_type -> quorumkv.v1.SetRequest
+	11, // 17: quorumkv.v1.ClientService.Get:input_type -> quorumkv.v1.GetRequest
+	13, // 18: quorumkv.v1.ClientService.Delete:input_type -> quorumkv.v1.DeleteRequest
+	22, // 19: quorumkv.v1.PeerService.Handshake:input_type -> quorumkv.v1.HandshakeRequest
+	24, // 20: quorumkv.v1.PeerService.Send:input_type -> quorumkv.v1.SendRequest
+	21, // 21: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
+	6,  // 22: quorumkv.v1.ClientService.OpenSession:output_type -> quorumkv.v1.OpenSessionResponse
+	8,  // 23: quorumkv.v1.ClientService.CloseSession:output_type -> quorumkv.v1.CloseSessionResponse
+	10, // 24: quorumkv.v1.ClientService.Set:output_type -> quorumkv.v1.SetResponse
+	12, // 25: quorumkv.v1.ClientService.Get:output_type -> quorumkv.v1.GetResponse
+	14, // 26: quorumkv.v1.ClientService.Delete:output_type -> quorumkv.v1.DeleteResponse
+	23, // 27: quorumkv.v1.PeerService.Handshake:output_type -> quorumkv.v1.HandshakeResponse
+	25, // 28: quorumkv.v1.PeerService.Send:output_type -> quorumkv.v1.SendResponse
+	21, // [21:29] is the sub-list for method output_type
+	13, // [13:21] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_quorumkv_v1_node_proto_init() }
@@ -2260,6 +2510,8 @@ func file_quorumkv_v1_node_proto_init() {
 		(*SendRequest_VoteResponse)(nil),
 		(*SendRequest_AppendEntriesRequest)(nil),
 		(*SendRequest_AppendEntriesResponse)(nil),
+		(*SendRequest_InstallSnapshotRequest)(nil),
+		(*SendRequest_InstallSnapshotResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2267,7 +2519,7 @@ func file_quorumkv_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_quorumkv_v1_node_proto_rawDesc), len(file_quorumkv_v1_node_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   29,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

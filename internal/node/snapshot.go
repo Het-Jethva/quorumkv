@@ -57,6 +57,18 @@ func snapshotIdentity(cfg config.Config) snapshot.Identity {
 	return snapshot.Identity{ClusterID: cfg.ClusterID, NodeID: cfg.Node.ID, MemberIDs: memberIDs}
 }
 
+func snapshotClusterMatches(got, want snapshot.Identity) bool {
+	if got.ClusterID != want.ClusterID || len(got.MemberIDs) != len(want.MemberIDs) {
+		return false
+	}
+	for index := range got.MemberIDs {
+		if got.MemberIDs[index] != want.MemberIDs[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *sessionMachine) snapshot(identity snapshot.Identity, includedIndex, includedTerm uint64) snapshot.State {
 	state := snapshot.State{
 		Identity:      identity,

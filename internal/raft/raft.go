@@ -93,6 +93,12 @@ type RecoverCommitted struct{}
 
 func (RecoverCommitted) isEvent() {}
 
+// SnapshotCompacted tells the core that applied history through Index now has
+// an immutable durable Snapshot and may no longer be sent as log entries.
+type SnapshotCompacted struct{ Index, Term uint64 }
+
+func (SnapshotCompacted) isEvent() {}
+
 // ProposeSession asks the current Leader to append one session command.
 type ProposeSession struct {
 	ProposalID ProposalID
@@ -207,6 +213,39 @@ type AppendEntriesFailed struct {
 
 func (AppendEntriesFailed) isEvent() {}
 
+// InstallSnapshot carries one bounded chunk. The runtime validates and stages
+// Data, then sets Success and Installed before delivering the event to Step.
+type InstallSnapshot struct {
+	From          NodeID
+	Term          uint64
+	RequestID     uint64
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
+	Length        uint64
+	Checksum      uint32
+	Offset        uint64
+	Data          []byte
+	Done          bool
+	Success       bool
+	NextOffset    uint64
+	Installed     bool
+}
+
+func (InstallSnapshot) isEvent() {}
+
+// InstallSnapshotResponse advances or completes one Leader transfer.
+type InstallSnapshotResponse struct {
+	From          NodeID
+	Term          uint64
+	RequestID     uint64
+	SnapshotIndex uint64
+	Success       bool
+	NextOffset    uint64
+	Done          bool
+}
+
+func (InstallSnapshotResponse) isEvent() {}
+
 // PersistHardState asks the runtime to durably store the current Term and vote.
 type PersistHardState struct {
 	PersistenceID uint64
@@ -282,6 +321,27 @@ type SendAppendEntriesResponse struct {
 }
 
 func (SendAppendEntriesResponse) isAction() {}
+
+// SendInstallSnapshot asks the runtime to load and send one bounded chunk of
+// the immutable Snapshot at SnapshotIndex/SnapshotTerm.
+type SendInstallSnapshot struct {
+	To            NodeID
+	Term          uint64
+	RequestID     uint64
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
+	Offset        uint64
+}
+
+func (SendInstallSnapshot) isAction() {}
+
+// SendInstallSnapshotResponse acknowledges one staged or installed chunk.
+type SendInstallSnapshotResponse struct {
+	To       NodeID
+	Response InstallSnapshotResponse
+}
+
+func (SendInstallSnapshotResponse) isAction() {}
 
 // ResetElectionTimer asks the runtime to choose and schedule a new randomized
 // election timeout.
@@ -426,29 +486,30 @@ type pendingAppend struct {
 
 // Node consumes one event at a time and emits effects without performing I/O.
 type Node struct {
-	id              NodeID
-	peers           []NodeID
-	role            Role
-	term            uint64
-	votedFor        NodeID
-	leaderID        NodeID
-	lastLogIndex    uint64
-	lastLogTerm     uint64
-	durableLogIndex uint64
-	logBaseIndex    uint64
-	logBaseTerm     uint64
-	log             []LogEntry
-	commitIndex     uint64
-	lastApplied     uint64
-	readReady       bool
-	votes           map[NodeID]struct{}
-	preVotes        map[NodeID]struct{}
-	activePeers     map[NodeID]struct{}
-	matchIndex      map[NodeID]uint64
-	nextIndex       map[NodeID]uint64
-	appendInFlight  map[NodeID]pendingAppend
-	nextRequestID   uint64
-	pendingReads    map[ReadID]*pendingRead
+	id               NodeID
+	peers            []NodeID
+	role             Role
+	term             uint64
+	votedFor         NodeID
+	leaderID         NodeID
+	lastLogIndex     uint64
+	lastLogTerm      uint64
+	durableLogIndex  uint64
+	logBaseIndex     uint64
+	logBaseTerm      uint64
+	log              []LogEntry
+	commitIndex      uint64
+	lastApplied      uint64
+	readReady        bool
+	votes            map[NodeID]struct{}
+	preVotes         map[NodeID]struct{}
+	activePeers      map[NodeID]struct{}
+	matchIndex       map[NodeID]uint64
+	nextIndex        map[NodeID]uint64
+	appendInFlight   map[NodeID]pendingAppend
+	snapshotInFlight map[NodeID]uint64
+	nextRequestID    uint64
+	pendingReads     map[ReadID]*pendingRead
 
 	// recentLeaderContact is cleared only when the election timer fires. It
 	// prevents a healthy Follower from helping an isolated peer disrupt a Leader.
@@ -519,6 +580,7 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		matchIndex:         make(map[NodeID]uint64),
 		nextIndex:          make(map[NodeID]uint64),
 		appendInFlight:     make(map[NodeID]pendingAppend),
+		snapshotInFlight:   make(map[NodeID]uint64),
 		pendingHardState:   make(map[uint64]pendingHardStatePersistence),
 		pendingLog:         make(map[uint64]pendingLogPersistence),
 		pendingCommit:      make(map[uint64]pendingCommitPersistence),
@@ -571,6 +633,9 @@ func (n *Node) Step(event Event) []Action {
 		return n.commitIndexPersisted(event)
 	case RecoverCommitted:
 		return n.applyThrough(n.durableCommitIndex)
+	case SnapshotCompacted:
+		n.compactLog(event.Index, event.Term)
+		return nil
 	case ProposeSession:
 		return n.proposeSession(event)
 	case ProposeSet:
@@ -593,6 +658,10 @@ func (n *Node) Step(event Event) []Action {
 		return n.handleAppendEntriesResponse(event)
 	case AppendEntriesFailed:
 		return n.handleAppendEntriesFailed(event)
+	case InstallSnapshot:
+		return n.handleInstallSnapshot(event)
+	case InstallSnapshotResponse:
+		return n.handleInstallSnapshotResponse(event)
 	default:
 		return nil
 	}
@@ -735,6 +804,7 @@ func (n *Node) handleVoteResponse(response VoteResponse) []Action {
 	n.matchIndex = make(map[NodeID]uint64)
 	n.nextIndex = make(map[NodeID]uint64)
 	n.appendInFlight = make(map[NodeID]pendingAppend)
+	n.snapshotInFlight = make(map[NodeID]uint64)
 	n.readReady = false
 	entry := LogEntry{Index: n.lastLogIndex + 1, Term: n.term, Type: EntryNoOp}
 	n.appendEntries([]LogEntry{entry})
@@ -860,7 +930,15 @@ func (n *Node) sendAppendEntriesTo(peer NodeID, readID ReadID) []Action {
 	// A peer behind the compacted prefix requires InstallSnapshot, which is
 	// emitted by the Snapshot-transfer slice rather than fabricating log data.
 	if nextIndex <= n.logBaseIndex {
-		return nil
+		if n.snapshotInFlight[peer] != 0 {
+			return nil
+		}
+		n.nextRequestID++
+		n.snapshotInFlight[peer] = n.nextRequestID
+		return []Action{SendInstallSnapshot{
+			To: peer, Term: n.term, RequestID: n.nextRequestID,
+			SnapshotIndex: n.logBaseIndex, SnapshotTerm: n.logBaseTerm,
+		}}
 	}
 	prevIndex := nextIndex - 1
 	n.nextRequestID++
@@ -982,7 +1060,83 @@ func (n *Node) handleAppendEntriesFailed(event AppendEntriesFailed) []Action {
 	if n.appendInFlight[event.To].requestID == event.RequestID {
 		delete(n.appendInFlight, event.To)
 	}
+	if n.snapshotInFlight[event.To] == event.RequestID {
+		delete(n.snapshotInFlight, event.To)
+	}
 	return nil
+}
+
+func (n *Node) handleInstallSnapshot(request InstallSnapshot) []Action {
+	if request.Term < n.term {
+		return n.snapshotResponse(request, false, request.Offset, false)
+	}
+	termChanged := request.Term > n.term
+	if termChanged {
+		n.becomeFollower(request.Term, request.From)
+	} else {
+		n.role = Follower
+		n.leaderID = request.From
+		n.readReady = false
+	}
+	n.recentLeaderContact = true
+	if request.Installed && request.SnapshotIndex > n.logBaseIndex {
+		first := 0
+		for first < len(n.log) && n.log[first].Index <= request.SnapshotIndex {
+			first++
+		}
+		if request.SnapshotIndex <= n.lastLogIndex && n.termAt(request.SnapshotIndex) == request.SnapshotTerm {
+			n.log = cloneLogEntries(n.log[first:])
+		} else {
+			n.log = nil
+			n.lastLogIndex = request.SnapshotIndex
+			n.lastLogTerm = request.SnapshotTerm
+			n.durableLogIndex = request.SnapshotIndex
+		}
+		n.logBaseIndex = request.SnapshotIndex
+		n.logBaseTerm = request.SnapshotTerm
+		n.commitIndex = max(n.commitIndex, request.SnapshotIndex)
+		n.durableCommitIndex = max(n.durableCommitIndex, request.SnapshotIndex)
+		n.lastApplied = request.SnapshotIndex
+		if len(n.log) > 0 {
+			n.lastLogIndex = n.log[len(n.log)-1].Index
+			n.lastLogTerm = n.log[len(n.log)-1].Term
+			n.durableLogIndex = n.lastLogIndex
+		}
+	}
+	after := append([]Action{ResetElectionTimer{}}, n.snapshotResponse(request, request.Success, request.NextOffset, request.Installed)...)
+	if termChanged {
+		return n.persistHardState(after)
+	}
+	return after
+}
+
+func (n *Node) snapshotResponse(request InstallSnapshot, success bool, nextOffset uint64, done bool) []Action {
+	return []Action{SendInstallSnapshotResponse{To: request.From, Response: InstallSnapshotResponse{
+		From: n.id, Term: n.term, RequestID: request.RequestID, SnapshotIndex: request.SnapshotIndex,
+		Success: success, NextOffset: nextOffset, Done: done,
+	}}}
+}
+
+func (n *Node) handleInstallSnapshotResponse(response InstallSnapshotResponse) []Action {
+	if response.Term > n.term {
+		n.becomeFollower(response.Term, "")
+		return n.persistHardState(nil)
+	}
+	if n.role != Leader || response.Term != n.term || n.snapshotInFlight[response.From] != response.RequestID {
+		return nil
+	}
+	if !response.Success {
+		delete(n.snapshotInFlight, response.From)
+		return nil
+	}
+	if !response.Done {
+		return []Action{SendInstallSnapshot{To: response.From, Term: n.term, RequestID: response.RequestID,
+			SnapshotIndex: n.logBaseIndex, SnapshotTerm: n.logBaseTerm, Offset: response.NextOffset}}
+	}
+	delete(n.snapshotInFlight, response.From)
+	n.matchIndex[response.From] = max(n.matchIndex[response.From], response.SnapshotIndex)
+	n.nextIndex[response.From] = response.SnapshotIndex + 1
+	return n.sendAppendEntriesTo(response.From, n.pendingReadFor(response.From))
 }
 
 func (n *Node) acknowledgeRead(response AppendEntriesResponse) []Action {
@@ -1026,6 +1180,7 @@ func (n *Node) becomeFollower(term uint64, leader NodeID) {
 	n.matchIndex = make(map[NodeID]uint64)
 	n.nextIndex = make(map[NodeID]uint64)
 	n.appendInFlight = make(map[NodeID]pendingAppend)
+	n.snapshotInFlight = make(map[NodeID]uint64)
 	n.pendingReads = make(map[ReadID]*pendingRead)
 	n.readReady = false
 }
@@ -1098,6 +1253,15 @@ func (n *Node) commitIndexPersisted(event CommitIndexPersisted) []Action {
 	}
 	actions := n.applyThrough(pending.commitIndex)
 	return append(actions, pending.after...)
+}
+
+func (n *Node) compactLog(index, term uint64) {
+	if index <= n.logBaseIndex || index > n.lastApplied || n.termAt(index) != term {
+		return
+	}
+	first := index - n.logBaseIndex
+	n.log = cloneLogEntries(n.log[first:])
+	n.logBaseIndex, n.logBaseTerm = index, term
 }
 
 func (n *Node) appendEntries(entries []LogEntry) {

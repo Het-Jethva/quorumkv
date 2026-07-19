@@ -158,6 +158,34 @@ func LoadNewest(directory string, compatibility Compatibility) (*State, error) {
 	return newest, nil
 }
 
+// Encoded returns the newest immutable Snapshot file at the requested
+// position. The returned bytes include the versioned, checksummed file header.
+func Encoded(directory string, includedIndex, includedTerm uint64) ([]byte, error) {
+	pattern := filepath.Join(directory, fmt.Sprintf("snapshot-%020d-%020d-*.qsnap", includedIndex, includedTerm))
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("find snapshot at %d/%d: %w", includedIndex, includedTerm, err)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("snapshot at %d/%d is not installed", includedIndex, includedTerm)
+	}
+	sort.Strings(matches)
+	name := matches[len(matches)-1]
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot %q: %w", name, err)
+	}
+	if _, err := decode(name, contents); err != nil {
+		return nil, err
+	}
+	return contents, nil
+}
+
+// Decode validates an encoded Snapshot file before returning its state.
+func Decode(contents []byte) (*State, error) {
+	return decode("received Snapshot", contents)
+}
+
 func read(name string) (*State, error) {
 	info, err := os.Stat(name)
 	if err != nil {
@@ -169,6 +197,13 @@ func read(name string) (*State, error) {
 	contents, err := os.ReadFile(name)
 	if err != nil {
 		return nil, fmt.Errorf("read Snapshot %q: %w", name, err)
+	}
+	return decode(name, contents)
+}
+
+func decode(name string, contents []byte) (*State, error) {
+	if uint64(len(contents)) > maxPayloadSize+uint64(headerSize) {
+		return nil, fmt.Errorf("stored Snapshot %q size %d exceeds limit %d", name, len(contents), maxPayloadSize+uint64(headerSize))
 	}
 	if len(contents) < headerSize {
 		return nil, fmt.Errorf("stored Snapshot %q is shorter than its header", name)
