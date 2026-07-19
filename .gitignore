@@ -1,0 +1,25 @@
+# Go build and test output
+*.exe
+*.exe~
+*.test
+*.out
+/bin/
+/dist/
+/coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# QuorumKV runtime state
+/data/
+/var/
+*.wal
+*.snap
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
