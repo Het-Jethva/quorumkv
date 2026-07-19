@@ -3,6 +3,8 @@ package raft
 
 import "sort"
 
+const maxAppendEntriesBytes = 1<<20 + 4<<10
+
 // NodeID identifies one Node in a Cluster.
 type NodeID string
 
@@ -172,6 +174,7 @@ func (VoteResponse) isEvent() {}
 type AppendEntries struct {
 	From         NodeID
 	Term         uint64
+	RequestID    uint64
 	PrevLogIndex uint64
 	PrevLogTerm  uint64
 	Entries      []LogEntry
@@ -183,14 +186,26 @@ func (AppendEntries) isEvent() {}
 
 // AppendEntriesResponse reports the durable replicated prefix of a Follower.
 type AppendEntriesResponse struct {
-	From       NodeID
-	Term       uint64
-	Success    bool
-	MatchIndex uint64
-	ReadID     ReadID
+	From          NodeID
+	Term          uint64
+	RequestID     uint64
+	Success       bool
+	MatchIndex    uint64
+	ConflictTerm  uint64
+	ConflictIndex uint64
+	ReadID        ReadID
 }
 
 func (AppendEntriesResponse) isEvent() {}
+
+// AppendEntriesFailed reports that the runtime could not deliver one
+// replication request. A later heartbeat may retry the same Follower.
+type AppendEntriesFailed struct {
+	To        NodeID
+	RequestID uint64
+}
+
+func (AppendEntriesFailed) isEvent() {}
 
 // PersistHardState asks the runtime to durably store the current Term and vote.
 type PersistHardState struct {
@@ -382,6 +397,7 @@ type pendingLogPersistence struct {
 	purpose      logPersistencePurpose
 	term         uint64
 	leader       NodeID
+	requestID    uint64
 	truncateFrom uint64
 	lastIndex    uint64
 	leaderCommit uint64
@@ -397,6 +413,11 @@ type pendingRead struct {
 	acknowledgements map[NodeID]struct{}
 	commitIndex      uint64
 	confirmed        bool
+}
+
+type pendingAppend struct {
+	requestID    uint64
+	leaderCommit uint64
 }
 
 // Node consumes one event at a time and emits effects without performing I/O.
@@ -418,6 +439,9 @@ type Node struct {
 	preVotes        map[NodeID]struct{}
 	activePeers     map[NodeID]struct{}
 	matchIndex      map[NodeID]uint64
+	nextIndex       map[NodeID]uint64
+	appendInFlight  map[NodeID]pendingAppend
+	nextRequestID   uint64
 	pendingReads    map[ReadID]*pendingRead
 
 	// recentLeaderContact is cleared only when the election timer fires. It
@@ -473,6 +497,8 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		preVotes:           make(map[NodeID]struct{}),
 		activePeers:        make(map[NodeID]struct{}),
 		matchIndex:         make(map[NodeID]uint64),
+		nextIndex:          make(map[NodeID]uint64),
+		appendInFlight:     make(map[NodeID]pendingAppend),
 		pendingHardState:   make(map[uint64]pendingHardStatePersistence),
 		pendingLog:         make(map[uint64]pendingLogPersistence),
 		pendingCommit:      make(map[uint64]pendingCommitPersistence),
@@ -540,6 +566,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.handleAppendEntries(event)
 	case AppendEntriesResponse:
 		return n.handleAppendEntriesResponse(event)
+	case AppendEntriesFailed:
+		return n.handleAppendEntriesFailed(event)
 	default:
 		return nil
 	}
@@ -637,7 +665,7 @@ func (n *Node) logEntriesPersisted(event LogEntriesPersisted) []Action {
 		}
 		return n.advanceFollowerCommit(
 			pending.leaderCommit,
-			n.appendEntriesResponse(pending.leader, true, pending.lastIndex, pending.readID),
+			n.appendEntriesResponse(pending.leader, pending.requestID, true, pending.lastIndex, 0, 0, pending.readID),
 		)
 	default:
 		return nil
@@ -679,10 +707,15 @@ func (n *Node) handleVoteResponse(response VoteResponse) []Action {
 	n.role = Leader
 	n.leaderID = n.id
 	n.activePeers = make(map[NodeID]struct{})
-	n.matchIndex = map[NodeID]uint64{n.id: n.lastLogIndex + 1}
+	n.matchIndex = make(map[NodeID]uint64)
+	n.nextIndex = make(map[NodeID]uint64)
+	n.appendInFlight = make(map[NodeID]pendingAppend)
 	n.readReady = false
 	entry := LogEntry{Index: n.lastLogIndex + 1, Term: n.term, Type: EntryNoOp}
 	n.appendEntries([]LogEntry{entry})
+	for _, peer := range n.peers {
+		n.nextIndex[peer] = n.lastLogIndex + 1
+	}
 	actions := []Action{BecameLeader{Term: n.term}, ResetHeartbeatTimer{}, ResetCheckQuorumTimer{}}
 	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
 		purpose:   persistLeaderEntry,
@@ -771,35 +804,53 @@ func (n *Node) heartbeatRound() []Action {
 	if n.role != Leader {
 		return nil
 	}
+	// A heartbeat interval is also the replication response deadline. Expiring
+	// the logical request permits retry while preserving one active request per
+	// Follower and makes a lost response an ordinary retry.
+	clear(n.appendInFlight)
 	return append([]Action{ResetHeartbeatTimer{}}, n.sendAppendEntries(0)...)
 }
 
 func (n *Node) sendAppendEntries(readID ReadID) []Action {
 	actions := make([]Action, 0, len(n.peers))
-	durableLastIndex := min(n.durableLogIndex, n.lastLogIndex)
 	for _, peer := range n.peers {
-		nextIndex := n.matchIndex[peer] + 1
-		if nextIndex > durableLastIndex+1 {
-			nextIndex = durableLastIndex + 1
+		peerReadID := readID
+		if peerReadID == 0 {
+			peerReadID = n.pendingReadFor(peer)
 		}
-		prevIndex := nextIndex - 1
-		request := AppendEntries{
-			From:         n.id,
-			Term:         n.term,
-			PrevLogIndex: prevIndex,
-			PrevLogTerm:  n.termAt(prevIndex),
-			Entries:      n.entriesBetween(nextIndex, durableLastIndex),
-			LeaderCommit: n.commitIndex,
-			ReadID:       readID,
-		}
-		actions = append(actions, SendAppendEntries{To: peer, Request: request})
+		actions = append(actions, n.sendAppendEntriesTo(peer, peerReadID)...)
 	}
 	return actions
 }
 
+func (n *Node) sendAppendEntriesTo(peer NodeID, readID ReadID) []Action {
+	if n.appendInFlight[peer].requestID != 0 {
+		return nil
+	}
+	durableLastIndex := min(n.durableLogIndex, n.lastLogIndex)
+	nextIndex := n.nextIndex[peer]
+	if nextIndex == 0 || nextIndex > durableLastIndex+1 {
+		nextIndex = durableLastIndex + 1
+	}
+	prevIndex := nextIndex - 1
+	n.nextRequestID++
+	request := AppendEntries{
+		From:         n.id,
+		Term:         n.term,
+		RequestID:    n.nextRequestID,
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  n.termAt(prevIndex),
+		Entries:      n.entriesBatch(nextIndex, durableLastIndex),
+		LeaderCommit: n.commitIndex,
+		ReadID:       readID,
+	}
+	n.appendInFlight[peer] = pendingAppend{requestID: request.RequestID, leaderCommit: request.LeaderCommit}
+	return []Action{SendAppendEntries{To: peer, Request: request}}
+}
+
 func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 	if request.Term < n.term {
-		return n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)
+		return n.appendEntriesResponse(request.From, request.RequestID, false, n.lastLogIndex, 0, 0, request.ReadID)
 	}
 	termChanged := request.Term > n.term
 	if termChanged {
@@ -812,7 +863,8 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 	n.recentLeaderContact = true
 	after := []Action{ResetElectionTimer{}}
 	if !n.matches(request.PrevLogIndex, request.PrevLogTerm) {
-		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)...)
+		conflictTerm, conflictIndex := n.conflictHint(request.PrevLogIndex)
+		after = append(after, n.appendEntriesResponse(request.From, request.RequestID, false, n.lastLogIndex, conflictTerm, conflictIndex, request.ReadID)...)
 		if termChanged {
 			return n.persistHardState(after)
 		}
@@ -821,7 +873,8 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 
 	newEntries, truncateFrom, ok := n.entriesToAppend(request.PrevLogIndex, request.Entries)
 	if !ok {
-		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)...)
+		conflictTerm, conflictIndex := n.conflictHint(request.PrevLogIndex + 1)
+		after = append(after, n.appendEntriesResponse(request.From, request.RequestID, false, n.lastLogIndex, conflictTerm, conflictIndex, request.ReadID)...)
 		if termChanged {
 			return n.persistHardState(after)
 		}
@@ -840,6 +893,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 			lastIndex:    n.lastLogIndex,
 			leaderCommit: request.LeaderCommit,
 			readID:       request.ReadID,
+			requestID:    request.RequestID,
 		})...)
 	} else {
 		if n.lastLogIndex > n.durableLogIndex {
@@ -850,7 +904,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 		}
 		after = append(after, n.advanceFollowerCommit(
 			request.LeaderCommit,
-			n.appendEntriesResponse(request.From, true, n.lastLogIndex, request.ReadID),
+			n.appendEntriesResponse(request.From, request.RequestID, true, n.lastLogIndex, 0, 0, request.ReadID),
 		)...)
 	}
 	if termChanged {
@@ -867,15 +921,38 @@ func (n *Node) handleAppendEntriesResponse(response AppendEntriesResponse) []Act
 	if n.role != Leader || response.Term != n.term {
 		return nil
 	}
+	pending := n.appendInFlight[response.From]
+	if pending.requestID != 0 && response.RequestID != 0 && response.RequestID != pending.requestID {
+		return nil
+	}
+	delete(n.appendInFlight, response.From)
 	n.activePeers[response.From] = struct{}{}
-	if response.Success && response.MatchIndex > n.matchIndex[response.From] {
-		n.matchIndex[response.From] = response.MatchIndex
+	if response.Success {
+		if response.MatchIndex > n.matchIndex[response.From] {
+			n.matchIndex[response.From] = response.MatchIndex
+		}
+		n.nextIndex[response.From] = n.matchIndex[response.From] + 1
+	} else {
+		n.nextIndex[response.From] = n.nextIndexFromConflict(response)
 	}
 	var actions []Action
 	if n.advanceLeaderCommit() {
 		actions = n.persistCommit(n.sendAppendEntries(0))
+	} else {
+		readID := n.pendingReadFor(response.From)
+		durableLastIndex := min(n.durableLogIndex, n.lastLogIndex)
+		if !response.Success || n.nextIndex[response.From] <= durableLastIndex || readID != 0 || pending.leaderCommit < n.commitIndex {
+			actions = n.sendAppendEntriesTo(response.From, readID)
+		}
 	}
 	return append(actions, n.acknowledgeRead(response)...)
+}
+
+func (n *Node) handleAppendEntriesFailed(event AppendEntriesFailed) []Action {
+	if n.appendInFlight[event.To].requestID == event.RequestID {
+		delete(n.appendInFlight, event.To)
+	}
+	return nil
 }
 
 func (n *Node) acknowledgeRead(response AppendEntriesResponse) []Action {
@@ -917,6 +994,8 @@ func (n *Node) becomeFollower(term uint64, leader NodeID) {
 	n.preVotes = make(map[NodeID]struct{})
 	n.activePeers = make(map[NodeID]struct{})
 	n.matchIndex = make(map[NodeID]uint64)
+	n.nextIndex = make(map[NodeID]uint64)
+	n.appendInFlight = make(map[NodeID]pendingAppend)
 	n.pendingReads = make(map[ReadID]*pendingRead)
 	n.readReady = false
 }
@@ -937,13 +1016,16 @@ func (n *Node) voteResponse(to NodeID, granted bool) []Action {
 	return []Action{SendVoteResponse{To: to, Response: VoteResponse{From: n.id, Term: n.term, Granted: granted}}}
 }
 
-func (n *Node) appendEntriesResponse(to NodeID, success bool, matchIndex uint64, readID ReadID) []Action {
+func (n *Node) appendEntriesResponse(to NodeID, requestID uint64, success bool, matchIndex, conflictTerm, conflictIndex uint64, readID ReadID) []Action {
 	return []Action{SendAppendEntriesResponse{To: to, Response: AppendEntriesResponse{
-		From:       n.id,
-		Term:       n.term,
-		Success:    success,
-		MatchIndex: matchIndex,
-		ReadID:     readID,
+		From:          n.id,
+		Term:          n.term,
+		RequestID:     requestID,
+		Success:       success,
+		MatchIndex:    matchIndex,
+		ConflictTerm:  conflictTerm,
+		ConflictIndex: conflictIndex,
+		ReadID:        readID,
 	}}}
 }
 
@@ -1005,11 +1087,63 @@ func (n *Node) termAt(index uint64) uint64 {
 	return n.log[index-1].Term
 }
 
-func (n *Node) entriesBetween(first, last uint64) []LogEntry {
+func (n *Node) entriesBatch(first, last uint64) []LogEntry {
 	if first == 0 || first > last || last > n.lastLogIndex {
 		return nil
 	}
-	return cloneLogEntries(n.log[first-1 : last])
+	bytes := 0
+	end := first - 1
+	for index := first; index <= last; index++ {
+		entryBytes := 64 + len(n.log[index-1].Key) + len(n.log[index-1].Value)
+		if bytes+entryBytes > maxAppendEntriesBytes && end >= first {
+			break
+		}
+		bytes += entryBytes
+		end = index
+	}
+	return cloneLogEntries(n.log[first-1 : end])
+}
+
+func (n *Node) conflictHint(index uint64) (uint64, uint64) {
+	if index == 0 || index > n.lastLogIndex {
+		return 0, n.lastLogIndex + 1
+	}
+	term := n.termAt(index)
+	first := index
+	for first > 1 && n.termAt(first-1) == term {
+		first--
+	}
+	return term, first
+}
+
+func (n *Node) nextIndexFromConflict(response AppendEntriesResponse) uint64 {
+	next := response.ConflictIndex
+	if response.ConflictTerm != 0 {
+		for index := n.lastLogIndex; index > 0; index-- {
+			if n.termAt(index) == response.ConflictTerm {
+				next = index + 1
+				break
+			}
+		}
+	}
+	if next == 0 {
+		next = 1
+	}
+	return min(next, n.lastLogIndex+1)
+}
+
+func (n *Node) pendingReadFor(peer NodeID) ReadID {
+	readIDs := make([]ReadID, 0, len(n.pendingReads))
+	for id, read := range n.pendingReads {
+		if _, acknowledged := read.acknowledgements[peer]; !acknowledged {
+			readIDs = append(readIDs, id)
+		}
+	}
+	sort.Slice(readIDs, func(i, j int) bool { return readIDs[i] < readIDs[j] })
+	if len(readIDs) == 0 {
+		return 0
+	}
+	return readIDs[0]
 }
 
 func (n *Node) entriesToAppend(prevIndex uint64, entries []LogEntry) ([]LogEntry, uint64, bool) {

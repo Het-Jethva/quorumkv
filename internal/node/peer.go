@@ -204,10 +204,10 @@ func encodeRaftAction(cfg config.Config, action raft.Action) (raft.NodeID, *quor
 		for index, entry := range action.Request.Entries {
 			entries[index] = &quorumkvv1.RaftLogEntry{Index: entry.Index, Term: entry.Term, Type: encodeEntryType(entry.Type), SessionId: entry.SessionID[:], Sequence: entry.Sequence, Key: entry.Key, Value: entry.Value}
 		}
-		request.Message = &quorumkvv1.SendRequest_AppendEntriesRequest{AppendEntriesRequest: &quorumkvv1.AppendEntriesRequest{Term: action.Request.Term, PreviousLogIndex: action.Request.PrevLogIndex, PreviousLogTerm: action.Request.PrevLogTerm, Entries: entries, LeaderCommit: action.Request.LeaderCommit, ReadId: uint64(action.Request.ReadID)}}
+		request.Message = &quorumkvv1.SendRequest_AppendEntriesRequest{AppendEntriesRequest: &quorumkvv1.AppendEntriesRequest{Term: action.Request.Term, RequestId: action.Request.RequestID, PreviousLogIndex: action.Request.PrevLogIndex, PreviousLogTerm: action.Request.PrevLogTerm, Entries: entries, LeaderCommit: action.Request.LeaderCommit, ReadId: uint64(action.Request.ReadID)}}
 	case raft.SendAppendEntriesResponse:
 		to = action.To
-		request.Message = &quorumkvv1.SendRequest_AppendEntriesResponse{AppendEntriesResponse: &quorumkvv1.AppendEntriesResponse{Term: action.Response.Term, Success: action.Response.Success, MatchIndex: action.Response.MatchIndex, ReadId: uint64(action.Response.ReadID)}}
+		request.Message = &quorumkvv1.SendRequest_AppendEntriesResponse{AppendEntriesResponse: &quorumkvv1.AppendEntriesResponse{Term: action.Response.Term, RequestId: action.Response.RequestID, Success: action.Response.Success, MatchIndex: action.Response.MatchIndex, ConflictTerm: action.Response.ConflictTerm, ConflictIndex: action.Response.ConflictIndex, ReadId: uint64(action.Response.ReadID)}}
 	default:
 		return "", nil, fmt.Errorf("encode unsupported Raft action %T", action)
 	}
@@ -243,9 +243,9 @@ func decodeRaftMessage(request *quorumkvv1.SendRequest) (raft.Event, error) {
 			copy(sessionID[:], entry.SessionId)
 			entries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: entryType, SessionID: sessionID, Sequence: entry.Sequence, Key: entry.Key, Value: append([]byte(nil), entry.Value...)}
 		}
-		return raft.AppendEntries{From: from, Term: message.AppendEntriesRequest.Term, PrevLogIndex: message.AppendEntriesRequest.PreviousLogIndex, PrevLogTerm: message.AppendEntriesRequest.PreviousLogTerm, Entries: entries, LeaderCommit: message.AppendEntriesRequest.LeaderCommit, ReadID: raft.ReadID(message.AppendEntriesRequest.ReadId)}, nil
+		return raft.AppendEntries{From: from, Term: message.AppendEntriesRequest.Term, RequestID: message.AppendEntriesRequest.RequestId, PrevLogIndex: message.AppendEntriesRequest.PreviousLogIndex, PrevLogTerm: message.AppendEntriesRequest.PreviousLogTerm, Entries: entries, LeaderCommit: message.AppendEntriesRequest.LeaderCommit, ReadID: raft.ReadID(message.AppendEntriesRequest.ReadId)}, nil
 	case *quorumkvv1.SendRequest_AppendEntriesResponse:
-		return raft.AppendEntriesResponse{From: from, Term: message.AppendEntriesResponse.Term, Success: message.AppendEntriesResponse.Success, MatchIndex: message.AppendEntriesResponse.MatchIndex, ReadID: raft.ReadID(message.AppendEntriesResponse.ReadId)}, nil
+		return raft.AppendEntriesResponse{From: from, Term: message.AppendEntriesResponse.Term, RequestID: message.AppendEntriesResponse.RequestId, Success: message.AppendEntriesResponse.Success, MatchIndex: message.AppendEntriesResponse.MatchIndex, ConflictTerm: message.AppendEntriesResponse.ConflictTerm, ConflictIndex: message.AppendEntriesResponse.ConflictIndex, ReadID: raft.ReadID(message.AppendEntriesResponse.ReadId)}, nil
 	default:
 		return nil, fmt.Errorf("raft message payload is required")
 	}

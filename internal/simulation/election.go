@@ -173,6 +173,11 @@ func (c *Cluster) ProposeSession(id raft.NodeID, proposal raft.ProposeSession) e
 	return c.process(scheduledEvent{node: id, event: proposal})
 }
 
+// ProposeSet injects one deterministic SET command.
+func (c *Cluster) ProposeSet(id raft.NodeID, proposal raft.ProposeSet) error {
+	return c.process(scheduledEvent{node: id, event: proposal})
+}
+
 // Partition permits delivery only between Nodes in the same supplied group.
 func (c *Cluster) Partition(groups ...[]raft.NodeID) {
 	for from := range c.connected {
@@ -248,7 +253,9 @@ func (c *Cluster) process(initial scheduledEvent) error {
 			case raft.SendVoteResponse:
 				c.deliver(&queue, next.node, action.To, action.Response)
 			case raft.SendAppendEntries:
-				c.deliver(&queue, next.node, action.To, action.Request)
+				if !c.deliver(&queue, next.node, action.To, action.Request) {
+					queue = append(queue, scheduledEvent{node: next.node, event: raft.AppendEntriesFailed{To: action.To, RequestID: action.Request.RequestID}})
+				}
 			case raft.SendAppendEntriesResponse:
 				c.deliver(&queue, next.node, action.To, action.Response)
 			case raft.ResetElectionTimer:
@@ -277,10 +284,12 @@ func (c *Cluster) process(initial scheduledEvent) error {
 	return nil
 }
 
-func (c *Cluster) deliver(queue *[]scheduledEvent, from, to raft.NodeID, event raft.Event) {
+func (c *Cluster) deliver(queue *[]scheduledEvent, from, to raft.NodeID, event raft.Event) bool {
 	if c.connected[from][to] {
 		*queue = append(*queue, scheduledEvent{node: to, event: event})
+		return true
 	}
+	return false
 }
 
 func (c *Cluster) resetElectionTimer(id raft.NodeID) {
