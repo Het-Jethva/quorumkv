@@ -480,6 +480,114 @@ func (*SetResponse) Descriptor() ([]byte, []int) {
 	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{6}
 }
 
+// StaleSequence identifies a mutation older than the latest mutation whose
+// result the Cluster retains for this Client Session.
+type StaleSequence struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	ReceivedSequence uint64                 `protobuf:"varint,1,opt,name=received_sequence,json=receivedSequence,proto3" json:"received_sequence,omitempty"`
+	LastSequence     uint64                 `protobuf:"varint,2,opt,name=last_sequence,json=lastSequence,proto3" json:"last_sequence,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StaleSequence) Reset() {
+	*x = StaleSequence{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StaleSequence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StaleSequence) ProtoMessage() {}
+
+func (x *StaleSequence) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StaleSequence.ProtoReflect.Descriptor instead.
+func (*StaleSequence) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *StaleSequence) GetReceivedSequence() uint64 {
+	if x != nil {
+		return x.ReceivedSequence
+	}
+	return 0
+}
+
+func (x *StaleSequence) GetLastSequence() uint64 {
+	if x != nil {
+		return x.LastSequence
+	}
+	return 0
+}
+
+// OutOfOrderSequence identifies a mutation that skipped the next sequence for
+// its Client Session.
+type OutOfOrderSequence struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	ReceivedSequence uint64                 `protobuf:"varint,1,opt,name=received_sequence,json=receivedSequence,proto3" json:"received_sequence,omitempty"`
+	NextSequence     uint64                 `protobuf:"varint,2,opt,name=next_sequence,json=nextSequence,proto3" json:"next_sequence,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *OutOfOrderSequence) Reset() {
+	*x = OutOfOrderSequence{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OutOfOrderSequence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OutOfOrderSequence) ProtoMessage() {}
+
+func (x *OutOfOrderSequence) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OutOfOrderSequence.ProtoReflect.Descriptor instead.
+func (*OutOfOrderSequence) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *OutOfOrderSequence) GetReceivedSequence() uint64 {
+	if x != nil {
+		return x.ReceivedSequence
+	}
+	return 0
+}
+
+func (x *OutOfOrderSequence) GetNextSequence() uint64 {
+	if x != nil {
+		return x.NextSequence
+	}
+	return 0
+}
+
 // NotLeader is attached to a FailedPrecondition status when the receiving
 // Node knows where the client should retry directly.
 type NotLeader struct {
@@ -492,7 +600,7 @@ type NotLeader struct {
 
 func (x *NotLeader) Reset() {
 	*x = NotLeader{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +612,7 @@ func (x *NotLeader) String() string {
 func (*NotLeader) ProtoMessage() {}
 
 func (x *NotLeader) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +625,7 @@ func (x *NotLeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotLeader.ProtoReflect.Descriptor instead.
 func (*NotLeader) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{7}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *NotLeader) GetLeaderId() string {
@@ -550,7 +658,7 @@ type GetStatusResponse struct {
 
 func (x *GetStatusResponse) Reset() {
 	*x = GetStatusResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -562,7 +670,7 @@ func (x *GetStatusResponse) String() string {
 func (*GetStatusResponse) ProtoMessage() {}
 
 func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -575,7 +683,7 @@ func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetStatusResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{8}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetStatusResponse) GetClusterId() string {
@@ -647,7 +755,7 @@ type HandshakeRequest struct {
 
 func (x *HandshakeRequest) Reset() {
 	*x = HandshakeRequest{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -659,7 +767,7 @@ func (x *HandshakeRequest) String() string {
 func (*HandshakeRequest) ProtoMessage() {}
 
 func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -672,7 +780,7 @@ func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeRequest.ProtoReflect.Descriptor instead.
 func (*HandshakeRequest) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{9}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *HandshakeRequest) GetProtocolVersion() uint32 {
@@ -722,7 +830,7 @@ type HandshakeResponse struct {
 
 func (x *HandshakeResponse) Reset() {
 	*x = HandshakeResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +842,7 @@ func (x *HandshakeResponse) String() string {
 func (*HandshakeResponse) ProtoMessage() {}
 
 func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +855,7 @@ func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
 func (*HandshakeResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{10}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *HandshakeResponse) GetProtocolVersion() uint32 {
@@ -799,7 +907,7 @@ type SendRequest struct {
 
 func (x *SendRequest) Reset() {
 	*x = SendRequest{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -811,7 +919,7 @@ func (x *SendRequest) String() string {
 func (*SendRequest) ProtoMessage() {}
 
 func (x *SendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -824,7 +932,7 @@ func (x *SendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
 func (*SendRequest) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{11}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SendRequest) GetProtocolVersion() uint32 {
@@ -964,7 +1072,7 @@ type SendResponse struct {
 
 func (x *SendResponse) Reset() {
 	*x = SendResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -976,7 +1084,7 @@ func (x *SendResponse) String() string {
 func (*SendResponse) ProtoMessage() {}
 
 func (x *SendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -989,7 +1097,7 @@ func (x *SendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
 func (*SendResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{12}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{14}
 }
 
 type PreVoteRequest struct {
@@ -1003,7 +1111,7 @@ type PreVoteRequest struct {
 
 func (x *PreVoteRequest) Reset() {
 	*x = PreVoteRequest{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[13]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1015,7 +1123,7 @@ func (x *PreVoteRequest) String() string {
 func (*PreVoteRequest) ProtoMessage() {}
 
 func (x *PreVoteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[13]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1028,7 +1136,7 @@ func (x *PreVoteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreVoteRequest.ProtoReflect.Descriptor instead.
 func (*PreVoteRequest) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{13}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PreVoteRequest) GetTerm() uint64 {
@@ -1063,7 +1171,7 @@ type PreVoteResponse struct {
 
 func (x *PreVoteResponse) Reset() {
 	*x = PreVoteResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[14]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1075,7 +1183,7 @@ func (x *PreVoteResponse) String() string {
 func (*PreVoteResponse) ProtoMessage() {}
 
 func (x *PreVoteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[14]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1088,7 +1196,7 @@ func (x *PreVoteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreVoteResponse.ProtoReflect.Descriptor instead.
 func (*PreVoteResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{14}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PreVoteResponse) GetTerm() uint64 {
@@ -1123,7 +1231,7 @@ type VoteRequest struct {
 
 func (x *VoteRequest) Reset() {
 	*x = VoteRequest{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[15]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1135,7 +1243,7 @@ func (x *VoteRequest) String() string {
 func (*VoteRequest) ProtoMessage() {}
 
 func (x *VoteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[15]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1148,7 +1256,7 @@ func (x *VoteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteRequest.ProtoReflect.Descriptor instead.
 func (*VoteRequest) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{15}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *VoteRequest) GetTerm() uint64 {
@@ -1182,7 +1290,7 @@ type VoteResponse struct {
 
 func (x *VoteResponse) Reset() {
 	*x = VoteResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[16]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1194,7 +1302,7 @@ func (x *VoteResponse) String() string {
 func (*VoteResponse) ProtoMessage() {}
 
 func (x *VoteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[16]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1207,7 +1315,7 @@ func (x *VoteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteResponse.ProtoReflect.Descriptor instead.
 func (*VoteResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{16}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *VoteResponse) GetTerm() uint64 {
@@ -1237,7 +1345,7 @@ type AppendEntriesRequest struct {
 
 func (x *AppendEntriesRequest) Reset() {
 	*x = AppendEntriesRequest{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[17]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1249,7 +1357,7 @@ func (x *AppendEntriesRequest) String() string {
 func (*AppendEntriesRequest) ProtoMessage() {}
 
 func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[17]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1262,7 +1370,7 @@ func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
 func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{17}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AppendEntriesRequest) GetTerm() uint64 {
@@ -1311,7 +1419,7 @@ type AppendEntriesResponse struct {
 
 func (x *AppendEntriesResponse) Reset() {
 	*x = AppendEntriesResponse{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[18]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1323,7 +1431,7 @@ func (x *AppendEntriesResponse) String() string {
 func (*AppendEntriesResponse) ProtoMessage() {}
 
 func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[18]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1336,7 +1444,7 @@ func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
 func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{18}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AppendEntriesResponse) GetTerm() uint64 {
@@ -1375,7 +1483,7 @@ type RaftLogEntry struct {
 
 func (x *RaftLogEntry) Reset() {
 	*x = RaftLogEntry{}
-	mi := &file_quorumkv_v1_node_proto_msgTypes[19]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1387,7 +1495,7 @@ func (x *RaftLogEntry) String() string {
 func (*RaftLogEntry) ProtoMessage() {}
 
 func (x *RaftLogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_quorumkv_v1_node_proto_msgTypes[19]
+	mi := &file_quorumkv_v1_node_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1400,7 +1508,7 @@ func (x *RaftLogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftLogEntry.ProtoReflect.Descriptor instead.
 func (*RaftLogEntry) Descriptor() ([]byte, []int) {
-	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{19}
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RaftLogEntry) GetIndex() uint64 {
@@ -1473,7 +1581,13 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\bsequence\x18\x02 \x01(\x04R\bsequence\x12\x10\n" +
 	"\x03key\x18\x03 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x04 \x01(\fR\x05value\"\r\n" +
-	"\vSetResponse\"O\n" +
+	"\vSetResponse\"a\n" +
+	"\rStaleSequence\x12+\n" +
+	"\x11received_sequence\x18\x01 \x01(\x04R\x10receivedSequence\x12#\n" +
+	"\rlast_sequence\x18\x02 \x01(\x04R\flastSequence\"f\n" +
+	"\x12OutOfOrderSequence\x12+\n" +
+	"\x11received_sequence\x18\x01 \x01(\x04R\x10receivedSequence\x12#\n" +
+	"\rnext_sequence\x18\x02 \x01(\x04R\fnextSequence\"O\n" +
 	"\tNotLeader\x12\x1b\n" +
 	"\tleader_id\x18\x01 \x01(\tR\bleaderId\x12%\n" +
 	"\x0eleader_address\x18\x02 \x01(\tR\rleaderAddress\"\x9f\x02\n" +
@@ -1591,7 +1705,7 @@ func file_quorumkv_v1_node_proto_rawDescGZIP() []byte {
 }
 
 var file_quorumkv_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_quorumkv_v1_node_proto_goTypes = []any{
 	(NodeState)(0),                // 0: quorumkv.v1.NodeState
 	(RaftRole)(0),                 // 1: quorumkv.v1.RaftRole
@@ -1603,43 +1717,45 @@ var file_quorumkv_v1_node_proto_goTypes = []any{
 	(*CloseSessionResponse)(nil),  // 7: quorumkv.v1.CloseSessionResponse
 	(*SetRequest)(nil),            // 8: quorumkv.v1.SetRequest
 	(*SetResponse)(nil),           // 9: quorumkv.v1.SetResponse
-	(*NotLeader)(nil),             // 10: quorumkv.v1.NotLeader
-	(*GetStatusResponse)(nil),     // 11: quorumkv.v1.GetStatusResponse
-	(*HandshakeRequest)(nil),      // 12: quorumkv.v1.HandshakeRequest
-	(*HandshakeResponse)(nil),     // 13: quorumkv.v1.HandshakeResponse
-	(*SendRequest)(nil),           // 14: quorumkv.v1.SendRequest
-	(*SendResponse)(nil),          // 15: quorumkv.v1.SendResponse
-	(*PreVoteRequest)(nil),        // 16: quorumkv.v1.PreVoteRequest
-	(*PreVoteResponse)(nil),       // 17: quorumkv.v1.PreVoteResponse
-	(*VoteRequest)(nil),           // 18: quorumkv.v1.VoteRequest
-	(*VoteResponse)(nil),          // 19: quorumkv.v1.VoteResponse
-	(*AppendEntriesRequest)(nil),  // 20: quorumkv.v1.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil), // 21: quorumkv.v1.AppendEntriesResponse
-	(*RaftLogEntry)(nil),          // 22: quorumkv.v1.RaftLogEntry
+	(*StaleSequence)(nil),         // 10: quorumkv.v1.StaleSequence
+	(*OutOfOrderSequence)(nil),    // 11: quorumkv.v1.OutOfOrderSequence
+	(*NotLeader)(nil),             // 12: quorumkv.v1.NotLeader
+	(*GetStatusResponse)(nil),     // 13: quorumkv.v1.GetStatusResponse
+	(*HandshakeRequest)(nil),      // 14: quorumkv.v1.HandshakeRequest
+	(*HandshakeResponse)(nil),     // 15: quorumkv.v1.HandshakeResponse
+	(*SendRequest)(nil),           // 16: quorumkv.v1.SendRequest
+	(*SendResponse)(nil),          // 17: quorumkv.v1.SendResponse
+	(*PreVoteRequest)(nil),        // 18: quorumkv.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),       // 19: quorumkv.v1.PreVoteResponse
+	(*VoteRequest)(nil),           // 20: quorumkv.v1.VoteRequest
+	(*VoteResponse)(nil),          // 21: quorumkv.v1.VoteResponse
+	(*AppendEntriesRequest)(nil),  // 22: quorumkv.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil), // 23: quorumkv.v1.AppendEntriesResponse
+	(*RaftLogEntry)(nil),          // 24: quorumkv.v1.RaftLogEntry
 }
 var file_quorumkv_v1_node_proto_depIdxs = []int32{
 	0,  // 0: quorumkv.v1.GetStatusResponse.state:type_name -> quorumkv.v1.NodeState
 	1,  // 1: quorumkv.v1.GetStatusResponse.role:type_name -> quorumkv.v1.RaftRole
-	16, // 2: quorumkv.v1.SendRequest.pre_vote_request:type_name -> quorumkv.v1.PreVoteRequest
-	17, // 3: quorumkv.v1.SendRequest.pre_vote_response:type_name -> quorumkv.v1.PreVoteResponse
-	18, // 4: quorumkv.v1.SendRequest.vote_request:type_name -> quorumkv.v1.VoteRequest
-	19, // 5: quorumkv.v1.SendRequest.vote_response:type_name -> quorumkv.v1.VoteResponse
-	20, // 6: quorumkv.v1.SendRequest.append_entries_request:type_name -> quorumkv.v1.AppendEntriesRequest
-	21, // 7: quorumkv.v1.SendRequest.append_entries_response:type_name -> quorumkv.v1.AppendEntriesResponse
-	22, // 8: quorumkv.v1.AppendEntriesRequest.entries:type_name -> quorumkv.v1.RaftLogEntry
+	18, // 2: quorumkv.v1.SendRequest.pre_vote_request:type_name -> quorumkv.v1.PreVoteRequest
+	19, // 3: quorumkv.v1.SendRequest.pre_vote_response:type_name -> quorumkv.v1.PreVoteResponse
+	20, // 4: quorumkv.v1.SendRequest.vote_request:type_name -> quorumkv.v1.VoteRequest
+	21, // 5: quorumkv.v1.SendRequest.vote_response:type_name -> quorumkv.v1.VoteResponse
+	22, // 6: quorumkv.v1.SendRequest.append_entries_request:type_name -> quorumkv.v1.AppendEntriesRequest
+	23, // 7: quorumkv.v1.SendRequest.append_entries_response:type_name -> quorumkv.v1.AppendEntriesResponse
+	24, // 8: quorumkv.v1.AppendEntriesRequest.entries:type_name -> quorumkv.v1.RaftLogEntry
 	2,  // 9: quorumkv.v1.RaftLogEntry.type:type_name -> quorumkv.v1.RaftEntryType
 	3,  // 10: quorumkv.v1.NodeService.GetStatus:input_type -> quorumkv.v1.GetStatusRequest
 	4,  // 11: quorumkv.v1.ClientService.OpenSession:input_type -> quorumkv.v1.OpenSessionRequest
 	6,  // 12: quorumkv.v1.ClientService.CloseSession:input_type -> quorumkv.v1.CloseSessionRequest
 	8,  // 13: quorumkv.v1.ClientService.Set:input_type -> quorumkv.v1.SetRequest
-	12, // 14: quorumkv.v1.PeerService.Handshake:input_type -> quorumkv.v1.HandshakeRequest
-	14, // 15: quorumkv.v1.PeerService.Send:input_type -> quorumkv.v1.SendRequest
-	11, // 16: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
+	14, // 14: quorumkv.v1.PeerService.Handshake:input_type -> quorumkv.v1.HandshakeRequest
+	16, // 15: quorumkv.v1.PeerService.Send:input_type -> quorumkv.v1.SendRequest
+	13, // 16: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
 	5,  // 17: quorumkv.v1.ClientService.OpenSession:output_type -> quorumkv.v1.OpenSessionResponse
 	7,  // 18: quorumkv.v1.ClientService.CloseSession:output_type -> quorumkv.v1.CloseSessionResponse
 	9,  // 19: quorumkv.v1.ClientService.Set:output_type -> quorumkv.v1.SetResponse
-	13, // 20: quorumkv.v1.PeerService.Handshake:output_type -> quorumkv.v1.HandshakeResponse
-	15, // 21: quorumkv.v1.PeerService.Send:output_type -> quorumkv.v1.SendResponse
+	15, // 20: quorumkv.v1.PeerService.Handshake:output_type -> quorumkv.v1.HandshakeResponse
+	17, // 21: quorumkv.v1.PeerService.Send:output_type -> quorumkv.v1.SendResponse
 	16, // [16:22] is the sub-list for method output_type
 	10, // [10:16] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
@@ -1652,7 +1768,7 @@ func file_quorumkv_v1_node_proto_init() {
 	if File_quorumkv_v1_node_proto != nil {
 		return
 	}
-	file_quorumkv_v1_node_proto_msgTypes[11].OneofWrappers = []any{
+	file_quorumkv_v1_node_proto_msgTypes[13].OneofWrappers = []any{
 		(*SendRequest_PreVoteRequest)(nil),
 		(*SendRequest_PreVoteResponse)(nil),
 		(*SendRequest_VoteRequest)(nil),
@@ -1666,7 +1782,7 @@ func file_quorumkv_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_quorumkv_v1_node_proto_rawDesc), len(file_quorumkv_v1_node_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   20,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

@@ -105,6 +105,9 @@ func TestRaftRuntimeReplaysOnlyDurableCommittedPrefix(t *testing.T) {
 	if _, exists := machine.values["uncommitted"]; exists {
 		t.Fatal("uncommitted suffix was applied during recovery")
 	}
+	if result, shouldApply := machine.evaluateSet(raft.SessionID(sessionID), 1); shouldApply || result.failure != sessionSucceeded {
+		t.Fatalf("retry recovered latest sequence = (%v, apply=%v), want cached success without apply", result.failure, shouldApply)
+	}
 	if state := runtime.core.State(); state.CommitIndex != 2 || state.LastApplied != 2 || state.LastLogIndex != 3 {
 		t.Fatalf("recovered Raft state = %#v, want applied through 2 with log through 3", state)
 	}
