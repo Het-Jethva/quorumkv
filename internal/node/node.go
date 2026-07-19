@@ -33,13 +33,14 @@ type Node struct {
 	quorumkvv1.UnimplementedClientServiceServer
 	quorumkvv1.UnimplementedPeerServiceServer
 
-	config       config.Config
-	ready        atomic.Bool
-	raftState    atomic.Value
-	events       chan raftInput
-	runtimeDone  chan struct{}
-	nextProposal atomic.Uint64
-	nextRead     atomic.Uint64
+	config          config.Config
+	ready           atomic.Bool
+	raftState       atomic.Value
+	events          chan raftInput
+	runtimeDone     chan struct{}
+	nextProposal    atomic.Uint64
+	nextRead        atomic.Uint64
+	observeMutation mutationObserver
 }
 
 type raftInput struct {
@@ -74,6 +75,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
+	runtime.observeMutation = n.observeMutation
 	defer func() {
 		if err := runtime.close(); err != nil && runErr == nil {
 			runErr = fmt.Errorf("close Node %q consensus state: %w", n.config.Node.ID, err)

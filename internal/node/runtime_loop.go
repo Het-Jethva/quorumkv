@@ -113,6 +113,10 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				proposalResults <- result
 				continue
 			}
+			if n.observeMutation != nil {
+				entry, _ := entryForMutation(event)
+				n.observeMutation(mutationBeforeAppend, entry)
+			}
 		}
 
 		wasLeader := runtime.core.State().Role == raft.Leader
@@ -159,6 +163,9 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				}
 			case raft.ApplyEntry:
 				result := sessions.apply(action.Entry)
+				if n.observeMutation != nil && (action.Entry.Type == raft.EntrySet || action.Entry.Type == raft.EntryDelete) {
+					n.observeMutation(mutationAfterApplication, action.Entry)
+				}
 				if (action.Entry.Type == raft.EntrySet || action.Entry.Type == raft.EntryDelete) && inFlightMutations[action.Entry.SessionID].sequence == action.Entry.Sequence {
 					delete(inFlightMutations, action.Entry.SessionID)
 				}
