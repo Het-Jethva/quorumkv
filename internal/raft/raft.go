@@ -75,6 +75,17 @@ type LogEntriesPersisted struct{ PersistenceID uint64 }
 
 func (LogEntriesPersisted) isEvent() {}
 
+// CommitIndexPersisted reports that the committed prefix is durable.
+type CommitIndexPersisted struct{ PersistenceID uint64 }
+
+func (CommitIndexPersisted) isEvent() {}
+
+// RecoverCommitted asks the core to reconstruct lastApplied by emitting the
+// durable committed prefix once during startup.
+type RecoverCommitted struct{}
+
+func (RecoverCommitted) isEvent() {}
+
 // ProposeSession asks the current Leader to append one session command.
 type ProposeSession struct {
 	ProposalID ProposalID
@@ -168,13 +179,24 @@ type PersistHardState struct {
 
 func (PersistHardState) isAction() {}
 
-// PersistLogEntries asks the runtime to append and sync entries in order.
+// PersistLogEntries asks the runtime to durably replace an optional
+// uncommitted suffix, then append and sync entries in order.
 type PersistLogEntries struct {
 	PersistenceID uint64
+	TruncateFrom  uint64
 	Entries       []LogEntry
 }
 
 func (PersistLogEntries) isAction() {}
+
+// PersistCommitIndex asks the runtime to sync the newly committed prefix
+// before any entry in that prefix is applied.
+type PersistCommitIndex struct {
+	PersistenceID uint64
+	CommitIndex   uint64
+}
+
+func (PersistCommitIndex) isAction() {}
 
 // SendPreVoteRequest sends a pre-vote request to one peer.
 type SendPreVoteRequest struct {
@@ -296,7 +318,15 @@ type HardState struct {
 	VotedFor NodeID
 }
 
-type pendingPersistence struct {
+// RecoveredState is the durable consensus state restored by the runtime.
+// lastApplied is intentionally absent and is reconstructed by RecoverCommitted.
+type RecoveredState struct {
+	HardState   HardState
+	Log         []LogEntry
+	CommitIndex uint64
+}
+
+type pendingHardStatePersistence struct {
 	term     uint64
 	votedFor NodeID
 	after    []Action
@@ -313,8 +343,14 @@ type pendingLogPersistence struct {
 	purpose      logPersistencePurpose
 	term         uint64
 	leader       NodeID
+	truncateFrom uint64
 	lastIndex    uint64
 	leaderCommit uint64
+}
+
+type pendingCommitPersistence struct {
+	commitIndex uint64
+	after       []Action
 }
 
 // Node consumes one event at a time and emits effects without performing I/O.
@@ -341,12 +377,15 @@ type Node struct {
 	// prevents a healthy Follower from helping an isolated peer disrupt a Leader.
 	recentLeaderContact bool
 
-	durableTerm        uint64
-	durableVotedFor    NodeID
-	nextPersistence    uint64
-	pending            map[uint64]pendingPersistence
-	nextLogPersistence uint64
-	pendingLog         map[uint64]pendingLogPersistence
+	durableTerm              uint64
+	durableVotedFor          NodeID
+	nextHardStatePersistence uint64
+	pendingHardState         map[uint64]pendingHardStatePersistence
+	nextLogPersistence       uint64
+	pendingLog               map[uint64]pendingLogPersistence
+	durableCommitIndex       uint64
+	nextCommitPersistence    uint64
+	pendingCommit            map[uint64]pendingCommitPersistence
 }
 
 // NewNode creates a Follower with an empty log and no durable election state.
@@ -365,27 +404,36 @@ func NewNodeWithHardState(id NodeID, peers []NodeID, hardState HardState) *Node 
 // NewNodeWithLog creates a Follower from durable election state and log
 // entries recovered by the runtime.
 func NewNodeWithLog(id NodeID, peers []NodeID, hardState HardState, entries []LogEntry) *Node {
+	return NewNodeFromRecoveredState(id, peers, RecoveredState{HardState: hardState, Log: entries})
+}
+
+// NewNodeFromRecoveredState creates a Follower whose durable committed prefix
+// will be applied only when the runtime delivers RecoverCommitted.
+func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredState) *Node {
 	orderedPeers := append([]NodeID(nil), peers...)
 	sort.Slice(orderedPeers, func(i, j int) bool { return orderedPeers[i] < orderedPeers[j] })
 	node := &Node{
-		id:              id,
-		peers:           orderedPeers,
-		role:            Follower,
-		term:            hardState.Term,
-		votedFor:        hardState.VotedFor,
-		durableTerm:     hardState.Term,
-		durableVotedFor: hardState.VotedFor,
-		votes:           make(map[NodeID]struct{}),
-		preVotes:        make(map[NodeID]struct{}),
-		activePeers:     make(map[NodeID]struct{}),
-		matchIndex:      make(map[NodeID]uint64),
-		pending:         make(map[uint64]pendingPersistence),
-		pendingLog:      make(map[uint64]pendingLogPersistence),
+		id:                 id,
+		peers:              orderedPeers,
+		role:               Follower,
+		term:               recovered.HardState.Term,
+		votedFor:           recovered.HardState.VotedFor,
+		durableTerm:        recovered.HardState.Term,
+		durableVotedFor:    recovered.HardState.VotedFor,
+		commitIndex:        recovered.CommitIndex,
+		durableCommitIndex: recovered.CommitIndex,
+		votes:              make(map[NodeID]struct{}),
+		preVotes:           make(map[NodeID]struct{}),
+		activePeers:        make(map[NodeID]struct{}),
+		matchIndex:         make(map[NodeID]uint64),
+		pendingHardState:   make(map[uint64]pendingHardStatePersistence),
+		pendingLog:         make(map[uint64]pendingLogPersistence),
+		pendingCommit:      make(map[uint64]pendingCommitPersistence),
 	}
-	if len(entries) > 0 {
-		node.log = append([]LogEntry(nil), entries...)
-		node.lastLogIndex = entries[len(entries)-1].Index
-		node.lastLogTerm = entries[len(entries)-1].Term
+	if len(recovered.Log) > 0 {
+		node.log = cloneLogEntries(recovered.Log)
+		node.lastLogIndex = recovered.Log[len(recovered.Log)-1].Index
+		node.lastLogTerm = recovered.Log[len(recovered.Log)-1].Term
 		node.durableLogIndex = node.lastLogIndex
 	}
 	return node
@@ -420,6 +468,10 @@ func (n *Node) Step(event Event) []Action {
 		return n.hardStatePersisted(event)
 	case LogEntriesPersisted:
 		return n.logEntriesPersisted(event)
+	case CommitIndexPersisted:
+		return n.commitIndexPersisted(event)
+	case RecoverCommitted:
+		return n.applyThrough(n.durableCommitIndex)
 	case ProposeSession:
 		return n.proposeSession(event)
 	case ProposeSet:
@@ -469,7 +521,7 @@ func (n *Node) handlePreVoteRequest(request PreVoteRequest) []Action {
 func (n *Node) handlePreVoteResponse(response PreVoteResponse) []Action {
 	if response.CurrentTerm > n.term {
 		n.becomeFollower(response.CurrentTerm, "")
-		return n.persist(nil)
+		return n.persistHardState(nil)
 	}
 	if n.role != PreCandidate || response.Term != n.term+1 || !response.Granted {
 		return nil
@@ -494,15 +546,15 @@ func (n *Node) startElection() []Action {
 	for _, peer := range n.peers {
 		after = append(after, SendVoteRequest{To: peer, Request: VoteRequest{From: n.id, Term: n.term, LastLogIndex: n.lastLogIndex, LastLogTerm: n.lastLogTerm}})
 	}
-	return n.persist(after)
+	return n.persistHardState(after)
 }
 
 func (n *Node) hardStatePersisted(event HardStatePersisted) []Action {
-	pending, ok := n.pending[event.PersistenceID]
+	pending, ok := n.pendingHardState[event.PersistenceID]
 	if !ok {
 		return nil
 	}
-	delete(n.pending, event.PersistenceID)
+	delete(n.pendingHardState, event.PersistenceID)
 	n.durableTerm = pending.term
 	n.durableVotedFor = pending.votedFor
 	if pending.term != n.term || pending.votedFor != n.votedFor {
@@ -531,8 +583,10 @@ func (n *Node) logEntriesPersisted(event LogEntriesPersisted) []Action {
 		if n.term != pending.term || n.role != Follower || n.leaderID != pending.leader {
 			return nil
 		}
-		actions := n.advanceFollowerCommit(pending.leaderCommit)
-		return append(actions, n.appendEntriesResponse(pending.leader, true, pending.lastIndex)...)
+		return n.advanceFollowerCommit(
+			pending.leaderCommit,
+			n.appendEntriesResponse(pending.leader, true, pending.lastIndex),
+		)
 	default:
 		return nil
 	}
@@ -553,7 +607,7 @@ func (n *Node) handleVoteRequest(request VoteRequest) []Action {
 	}
 	response := n.voteResponse(request.From, grant)
 	if termChanged || (grant && !n.voteIsDurable(request.From)) {
-		return n.persist(response)
+		return n.persistHardState(response)
 	}
 	return response
 }
@@ -561,7 +615,7 @@ func (n *Node) handleVoteRequest(request VoteRequest) []Action {
 func (n *Node) handleVoteResponse(response VoteResponse) []Action {
 	if response.Term > n.term {
 		n.becomeFollower(response.Term, "")
-		return n.persist(nil)
+		return n.persistHardState(nil)
 	}
 	if n.role != Candidate || response.Term != n.term || !response.Granted {
 		return nil
@@ -675,40 +729,46 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 	if !n.matches(request.PrevLogIndex, request.PrevLogTerm) {
 		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
 		if termChanged {
-			return n.persist(after)
+			return n.persistHardState(after)
 		}
 		return after
 	}
 
-	newEntries, ok := n.unseenEntries(request.PrevLogIndex, request.Entries)
+	newEntries, truncateFrom, ok := n.entriesToAppend(request.PrevLogIndex, request.Entries)
 	if !ok {
 		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
 		if termChanged {
-			return n.persist(after)
+			return n.persistHardState(after)
 		}
 		return after
 	}
 	if len(newEntries) > 0 {
+		if truncateFrom != 0 {
+			n.truncateLog(truncateFrom)
+		}
 		n.appendEntries(newEntries)
 		after = append(after, n.persistLog(newEntries, pendingLogPersistence{
 			purpose:      persistFollowerAppend,
 			term:         request.Term,
 			leader:       request.From,
+			truncateFrom: truncateFrom,
 			lastIndex:    n.lastLogIndex,
 			leaderCommit: request.LeaderCommit,
 		})...)
 	} else {
 		if n.lastLogIndex > n.durableLogIndex {
 			if termChanged {
-				return n.persist(after)
+				return n.persistHardState(after)
 			}
 			return after
 		}
-		after = append(after, n.advanceFollowerCommit(request.LeaderCommit)...)
-		after = append(after, n.appendEntriesResponse(request.From, true, n.lastLogIndex)...)
+		after = append(after, n.advanceFollowerCommit(
+			request.LeaderCommit,
+			n.appendEntriesResponse(request.From, true, n.lastLogIndex),
+		)...)
 	}
 	if termChanged {
-		return n.persist(after)
+		return n.persistHardState(after)
 	}
 	return after
 }
@@ -716,7 +776,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 func (n *Node) handleAppendEntriesResponse(response AppendEntriesResponse) []Action {
 	if response.Term > n.term {
 		n.becomeFollower(response.Term, "")
-		return n.persist(nil)
+		return n.persistHardState(nil)
 	}
 	if n.role != Leader || response.Term != n.term {
 		return nil
@@ -728,12 +788,10 @@ func (n *Node) handleAppendEntriesResponse(response AppendEntriesResponse) []Act
 	if response.MatchIndex > n.matchIndex[response.From] {
 		n.matchIndex[response.From] = response.MatchIndex
 	}
-	oldCommit := n.commitIndex
-	actions := n.advanceLeaderCommit()
-	if n.commitIndex > oldCommit {
-		actions = append(actions, n.sendAppendEntries()...)
+	if n.advanceLeaderCommit() {
+		return n.persistCommit(n.sendAppendEntries())
 	}
-	return actions
+	return nil
 }
 
 func (n *Node) checkQuorum() []Action {
@@ -789,10 +847,10 @@ func (n *Node) appendEntriesResponse(to NodeID, success bool, matchIndex uint64)
 	}}}
 }
 
-func (n *Node) persist(after []Action) []Action {
-	n.nextPersistence++
-	id := n.nextPersistence
-	n.pending[id] = pendingPersistence{term: n.term, votedFor: n.votedFor, after: after}
+func (n *Node) persistHardState(after []Action) []Action {
+	n.nextHardStatePersistence++
+	id := n.nextHardStatePersistence
+	n.pendingHardState[id] = pendingHardStatePersistence{term: n.term, votedFor: n.votedFor, after: after}
 	return []Action{PersistHardState{PersistenceID: id, Term: n.term, VotedFor: n.votedFor}}
 }
 
@@ -800,7 +858,34 @@ func (n *Node) persistLog(entries []LogEntry, pending pendingLogPersistence) []A
 	n.nextLogPersistence++
 	id := n.nextLogPersistence
 	n.pendingLog[id] = pending
-	return []Action{PersistLogEntries{PersistenceID: id, Entries: cloneLogEntries(entries)}}
+	return []Action{PersistLogEntries{
+		PersistenceID: id,
+		TruncateFrom:  pending.truncateFrom,
+		Entries:       cloneLogEntries(entries),
+	}}
+}
+
+func (n *Node) persistCommit(after []Action) []Action {
+	n.nextCommitPersistence++
+	id := n.nextCommitPersistence
+	n.pendingCommit[id] = pendingCommitPersistence{
+		commitIndex: n.commitIndex,
+		after:       after,
+	}
+	return []Action{PersistCommitIndex{PersistenceID: id, CommitIndex: n.commitIndex}}
+}
+
+func (n *Node) commitIndexPersisted(event CommitIndexPersisted) []Action {
+	pending, ok := n.pendingCommit[event.PersistenceID]
+	if !ok {
+		return nil
+	}
+	delete(n.pendingCommit, event.PersistenceID)
+	if pending.commitIndex > n.durableCommitIndex {
+		n.durableCommitIndex = pending.commitIndex
+	}
+	actions := n.applyThrough(pending.commitIndex)
+	return append(actions, pending.after...)
 }
 
 func (n *Node) appendEntries(entries []LogEntry) {
@@ -827,24 +912,34 @@ func (n *Node) entriesBetween(first, last uint64) []LogEntry {
 	return cloneLogEntries(n.log[first-1 : last])
 }
 
-func (n *Node) unseenEntries(prevIndex uint64, entries []LogEntry) ([]LogEntry, bool) {
+func (n *Node) entriesToAppend(prevIndex uint64, entries []LogEntry) ([]LogEntry, uint64, bool) {
 	for offset, entry := range entries {
 		wantIndex := prevIndex + uint64(offset) + 1
 		if entry.Index != wantIndex {
-			return nil, false
+			return nil, 0, false
 		}
 		if entry.Index <= n.lastLogIndex {
 			if n.termAt(entry.Index) != entry.Term {
-				return nil, false
+				if entry.Index <= n.commitIndex {
+					return nil, 0, false
+				}
+				return cloneLogEntries(entries[offset:]), entry.Index, true
 			}
 			continue
 		}
 		if entry.Index != n.lastLogIndex+1 {
-			return nil, false
+			return nil, 0, false
 		}
-		return cloneLogEntries(entries[offset:]), true
+		return cloneLogEntries(entries[offset:]), 0, true
 	}
-	return nil, true
+	return nil, 0, true
+}
+
+func (n *Node) truncateLog(firstIndex uint64) {
+	n.log = n.log[:firstIndex-1]
+	n.lastLogIndex = firstIndex - 1
+	n.lastLogTerm = n.termAt(n.lastLogIndex)
+	n.durableLogIndex = min(n.durableLogIndex, n.lastLogIndex)
 }
 
 func cloneLogEntries(entries []LogEntry) []LogEntry {
@@ -856,7 +951,7 @@ func cloneLogEntries(entries []LogEntry) []LogEntry {
 	return cloned
 }
 
-func (n *Node) advanceLeaderCommit() []Action {
+func (n *Node) advanceLeaderCommit() bool {
 	for index := n.lastLogIndex; index > n.commitIndex; index-- {
 		if n.termAt(index) != n.term {
 			continue
@@ -869,22 +964,27 @@ func (n *Node) advanceLeaderCommit() []Action {
 		}
 		if replicated >= n.quorum() {
 			n.commitIndex = index
-			return n.applyCommitted()
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-func (n *Node) advanceFollowerCommit(leaderCommit uint64) []Action {
-	if leaderCommit > n.commitIndex {
-		n.commitIndex = min(leaderCommit, n.lastLogIndex)
+func (n *Node) advanceFollowerCommit(leaderCommit uint64, after []Action) []Action {
+	target := min(leaderCommit, n.lastLogIndex)
+	if target > n.commitIndex {
+		n.commitIndex = target
+		return n.persistCommit(after)
 	}
-	return n.applyCommitted()
+	return append(n.applyThrough(n.durableCommitIndex), after...)
 }
 
-func (n *Node) applyCommitted() []Action {
-	actions := make([]Action, 0, n.commitIndex-n.lastApplied+1)
-	for n.lastApplied < n.commitIndex {
+func (n *Node) applyThrough(index uint64) []Action {
+	if index <= n.lastApplied {
+		return nil
+	}
+	actions := make([]Action, 0, index-n.lastApplied+1)
+	for n.lastApplied < index {
 		n.lastApplied++
 		entry := n.log[n.lastApplied-1]
 		actions = append(actions, ApplyEntry{Entry: entry})

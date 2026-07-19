@@ -35,6 +35,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	}
 
 	processes := make(map[string]*nodeProcess, 3)
+	configs := make(map[string]config.Config, 3)
 	for index := 1; index <= 3; index++ {
 		id := fmt.Sprintf("node-%d", index)
 		cfg := config.Config{
@@ -44,6 +45,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 			Node:               config.Node{ID: id, DataDir: filepath.Join(t.TempDir(), id)},
 			Members:            members,
 		}
+		configs[id] = cfg
 		processes[id] = startNodeProcess(t, cfg)
 	}
 	defer func() {
@@ -73,6 +75,18 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	} else if !strings.Contains(output, `"stored":true`) {
 		t.Fatalf("SET CLI output = %q, want stored success", output)
 	}
+
+	for _, process := range processes {
+		process.stop()
+	}
+	processes = make(map[string]*nodeProcess, 3)
+	for id, cfg := range configs {
+		processes[id] = startNodeProcess(t, cfg)
+	}
+	restartedLeader := waitForStableLeader(t, members, nil, processTestDeadline)
+	if output, err := runCLISet(members[restartedLeader].ClientAddress, sessionID, 2, "after-restart", "present", 5*time.Second); err != nil {
+		t.Fatalf("SET using recovered Client Session after restarting all Nodes: %v\n%s", err, output)
+	}
 	first = waitForSingleLeader(t, members, nil, processTestDeadline)
 
 	processes[first].stop()
@@ -83,7 +97,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 		t.Fatalf("replacement Leader = stopped Node %q", first)
 	}
 	replacementFollower := memberOtherThan(t, members, map[string]bool{first: true, replacement: true})
-	if output, err := runCLISet(replacementFollower.ClientAddress, sessionID, 2, "empty", "", 5*time.Second); err != nil {
+	if output, err := runCLISet(replacementFollower.ClientAddress, sessionID, 3, "empty", "", 5*time.Second); err != nil {
 		t.Fatalf("SET empty Value through replacement Leader: %v\n%s", err, output)
 	}
 	sessionClient = client.New(replacementFollower.ClientAddress)
