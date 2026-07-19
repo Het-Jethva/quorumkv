@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package quorumkv.v1;
+
+option go_package = "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1;quorumkvv1";
+
+service NodeService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  string cluster_id = 1;
+  string node_id = 2;
+  NodeState state = 3;
+  string peer_address = 4;
+  string client_address = 5;
+}
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_STARTING = 1;
+  NODE_STATE_READY = 2;
+}
