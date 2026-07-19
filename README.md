@@ -53,8 +53,10 @@ Snapshot recovery, linearizability, seeded fault schedules, and real
 multi-process election, failover, partition, restart, repair, and Snapshot
 scenarios. CI runs formatting, the full Go suite, race detection, vet, static
 analysis, Protobuf validation, and Linux/Windows portable coverage. The public
-project makes no production-readiness or performance claim; benchmark numbers
-will be added only after a reproducible durable benchmark is published.
+project makes no production-readiness claim. A reproducible durable benchmark
+and its raw measured result are in [benchmark/README.md](benchmark/README.md);
+published numbers are local development measurements with hardware and workload
+metadata, not production claims.
 
 ## Replay a deterministic fault schedule
 
