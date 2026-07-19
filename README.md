@@ -27,3 +27,17 @@ Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness
 Each Node automatically creates a Snapshot after retained committed-and-applied WAL entry frames reach `snapshot_threshold_bytes` (64 MiB when omitted). Snapshot file encoding and syncing run from an immutable apply-loop clone, so later commands continue while one Snapshot is in progress. Covered complete WAL segments are removed only after the Snapshot and a recovery checkpoint are durable. Tests and demos can also call `Node.CreateSnapshot` to trigger the same path manually.
 
 The Node stops gracefully when its context is canceled or it receives `SIGINT`/`SIGTERM`.
+
+## Replay a deterministic fault schedule
+
+The seeded simulator drives the three-Node Raft runtime through delayed, dropped,
+duplicated, and reordered messages; asymmetric partitions; crashes and restarts;
+and delayed persistence completions. It checks consensus, application, replicated
+state, and acknowledged-mutation durability invariants after every event.
+
+```sh
+go run ./cmd/quorumkvsim -seed 42 -steps 1000 -trace .traces/seed-42.json
+```
+
+A failure prints the exact replay command. CI uploads the ordered JSON traces from
+the failing seeded-simulation run as the `simulation-traces` artifact.

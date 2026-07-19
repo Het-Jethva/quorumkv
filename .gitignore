@@ -6,6 +6,7 @@
 /bin/
 /dist/
 /coverage/
+/.traces/
 
 # Local configuration and secrets
 .env
