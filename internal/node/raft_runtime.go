@@ -2,6 +2,7 @@ package node
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
@@ -11,8 +12,10 @@ import (
 // raftRuntime owns the synchronous boundary between deterministic election
 // decisions and durable local effects. Its caller owns event serialization.
 type raftRuntime struct {
-	core *raft.Node
-	wal  *wal.WAL
+	core            *raft.Node
+	wal             *wal.WAL
+	observeMutation mutationObserver
+	leaderMutations map[uint64]raft.LogEntry
 }
 
 func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, error) {
@@ -74,12 +77,35 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 			if err := r.wal.SaveLogEntries(entries); err != nil {
 				return nil, fmt.Errorf("persist Raft log entries: %w", err)
 			}
+			if r.observeMutation != nil && r.core.State().Role == raft.Leader {
+				if r.leaderMutations == nil {
+					r.leaderMutations = make(map[uint64]raft.LogEntry)
+				}
+				for _, entry := range persist.Entries {
+					if entry.Type != raft.EntrySet && entry.Type != raft.EntryDelete {
+						continue
+					}
+					r.leaderMutations[entry.Index] = entry
+					r.observeMutation(mutationAfterLocalPersistence, entry)
+				}
+			}
 			pending = append(pending, r.core.Step(raft.LogEntriesPersisted{
 				PersistenceID: persist.PersistenceID,
 			})...)
 		case raft.PersistCommitIndex:
+			var committedMutations []raft.LogEntry
+			if r.observeMutation != nil {
+				committedMutations = r.committedLeaderMutations(persist.CommitIndex)
+			}
+			for _, entry := range committedMutations {
+				r.observeMutation(mutationAfterQuorumPersistence, entry)
+			}
 			if err := r.wal.SaveCommitIndex(persist.CommitIndex); err != nil {
 				return nil, fmt.Errorf("persist Raft commit index: %w", err)
+			}
+			for _, entry := range committedMutations {
+				r.observeMutation(mutationAfterCommitment, entry)
+				delete(r.leaderMutations, entry.Index)
 			}
 			pending = append(pending, r.core.Step(raft.CommitIndexPersisted{
 				PersistenceID: persist.PersistenceID,
@@ -89,6 +115,17 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 		}
 	}
 	return emitted, nil
+}
+
+func (r *raftRuntime) committedLeaderMutations(commitIndex uint64) []raft.LogEntry {
+	entries := make([]raft.LogEntry, 0, len(r.leaderMutations))
+	for index, entry := range r.leaderMutations {
+		if index <= commitIndex {
+			entries = append(entries, entry)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Index < entries[j].Index })
+	return entries
 }
 
 func (r *raftRuntime) close() error {
