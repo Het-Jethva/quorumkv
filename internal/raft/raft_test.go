@@ -318,3 +318,64 @@ func TestSetAppliesOnlyAfterDurableQuorumReplication(t *testing.T) {
 		t.Fatalf("state after durable SET commit = %#v, want committed and applied through 2", state)
 	}
 }
+
+func TestReadWaitsForCurrentQuorumAndCapturedCommitApplication(t *testing.T) {
+	node := raft.NewNode("node-1", []raft.NodeID{"node-2", "node-3"})
+	node.Step(raft.ElectionTimeout{})
+	node.Step(raft.PreVoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1})
+	node.Step(raft.CommitIndexPersisted{PersistenceID: 1})
+
+	entry := raft.LogEntry{Index: 2, Term: 1, Type: raft.EntrySet, Key: "key", Value: []byte("latest")}
+	node.Step(raft.ProposeSet{ProposalID: 1, Key: entry.Key, Value: entry.Value})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 2})
+
+	actions := node.Step(raft.ConfirmRead{ReadID: 7})
+	wantRound := []raft.Action{
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 1, PrevLogIndex: 1, PrevLogTerm: 1, Entries: []raft.LogEntry{entry}, LeaderCommit: 1, ReadID: 7}},
+		raft.SendAppendEntries{To: "node-3", Request: raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{{Index: 1, Term: 1, Type: raft.EntryNoOp}, entry}, LeaderCommit: 1, ReadID: 7}},
+	}
+	if !reflect.DeepEqual(actions, wantRound) {
+		t.Fatalf("read confirmation actions = %#v, want quorum round without a log append %#v", actions, wantRound)
+	}
+
+	actions = node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 2, ReadID: 7})
+	wantCommit := []raft.Action{raft.PersistCommitIndex{PersistenceID: 2, CommitIndex: 2}}
+	if !reflect.DeepEqual(actions, wantCommit) {
+		t.Fatalf("quorum response actions = %#v, want commit persistence before read confirmation %#v", actions, wantCommit)
+	}
+	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 1 {
+		t.Fatalf("state before commit persistence = %#v, want captured index 2 still unapplied", state)
+	}
+
+	actions = node.Step(raft.CommitIndexPersisted{PersistenceID: 2})
+	if len(actions) < 2 || !reflect.DeepEqual(actions[0], raft.ApplyEntry{Entry: entry}) || !reflect.DeepEqual(actions[1], raft.ReadConfirmed{ReadID: 7, CommitIndex: 2}) {
+		t.Fatalf("durable commit actions = %#v, want apply followed by read confirmation", actions)
+	}
+}
+
+func TestReadWithoutQuorumIsNeverConfirmed(t *testing.T) {
+	node := raft.NewNode("node-1", []raft.NodeID{"node-2", "node-3"})
+	node.Step(raft.ElectionTimeout{})
+	node.Step(raft.PreVoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1})
+	node.Step(raft.CommitIndexPersisted{PersistenceID: 1})
+
+	actions := node.Step(raft.ConfirmRead{ReadID: 9})
+	for _, action := range actions {
+		if _, ok := action.(raft.ReadConfirmed); ok {
+			t.Fatalf("read confirmed before a peer response: %#v", actions)
+		}
+	}
+	node.Step(raft.CheckQuorumTimeout{})
+	node.Step(raft.CheckQuorumTimeout{})
+	if actions := node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1, ReadID: 9}); len(actions) != 0 {
+		t.Fatalf("demoted Leader accepted a late read response: %#v", actions)
+	}
+}

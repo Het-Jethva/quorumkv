@@ -39,6 +39,10 @@ type SessionID [16]byte
 // It is runtime metadata and is never stored in the log or sent to peers.
 type ProposalID uint64
 
+// ReadID correlates one local read with the quorum round that authorizes it.
+// It is runtime metadata and is never stored in the log.
+type ReadID uint64
+
 // LogEntry is one position in the replicated Raft log.
 type LogEntry struct {
 	Index     uint64
@@ -107,6 +111,11 @@ type ProposeSet struct {
 
 func (ProposeSet) isEvent() {}
 
+// ConfirmRead asks the Leader to prove current authority before a local read.
+type ConfirmRead struct{ ReadID ReadID }
+
+func (ConfirmRead) isEvent() {}
+
 // PreVoteRequest checks whether an election for Term would be viable without
 // changing any Node's current Term or durable vote.
 type PreVoteRequest struct {
@@ -156,6 +165,7 @@ type AppendEntries struct {
 	PrevLogTerm  uint64
 	Entries      []LogEntry
 	LeaderCommit uint64
+	ReadID       ReadID
 }
 
 func (AppendEntries) isEvent() {}
@@ -166,6 +176,7 @@ type AppendEntriesResponse struct {
 	Term       uint64
 	Success    bool
 	MatchIndex uint64
+	ReadID     ReadID
 }
 
 func (AppendEntriesResponse) isEvent() {}
@@ -298,6 +309,23 @@ type ProposalRejected struct {
 
 func (ProposalRejected) isAction() {}
 
+// ReadConfirmed authorizes a local read after a quorum response and local
+// application through the captured committed prefix.
+type ReadConfirmed struct {
+	ReadID      ReadID
+	CommitIndex uint64
+}
+
+func (ReadConfirmed) isAction() {}
+
+// ReadRejected reports that this Node cannot currently authorize the read.
+type ReadRejected struct {
+	ReadID   ReadID
+	LeaderID NodeID
+}
+
+func (ReadRejected) isAction() {}
+
 // State is a read-only snapshot used by runtimes and deterministic assertions.
 type State struct {
 	ID           NodeID
@@ -346,11 +374,18 @@ type pendingLogPersistence struct {
 	truncateFrom uint64
 	lastIndex    uint64
 	leaderCommit uint64
+	readID       ReadID
 }
 
 type pendingCommitPersistence struct {
 	commitIndex uint64
 	after       []Action
+}
+
+type pendingRead struct {
+	acknowledgements map[NodeID]struct{}
+	commitIndex      uint64
+	confirmed        bool
 }
 
 // Node consumes one event at a time and emits effects without performing I/O.
@@ -372,6 +407,7 @@ type Node struct {
 	preVotes        map[NodeID]struct{}
 	activePeers     map[NodeID]struct{}
 	matchIndex      map[NodeID]uint64
+	pendingReads    map[ReadID]*pendingRead
 
 	// recentLeaderContact is cleared only when the election timer fires. It
 	// prevents a healthy Follower from helping an isolated peer disrupt a Leader.
@@ -429,6 +465,7 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		pendingHardState:   make(map[uint64]pendingHardStatePersistence),
 		pendingLog:         make(map[uint64]pendingLogPersistence),
 		pendingCommit:      make(map[uint64]pendingCommitPersistence),
+		pendingReads:       make(map[ReadID]*pendingRead),
 	}
 	if len(recovered.Log) > 0 {
 		node.log = cloneLogEntries(recovered.Log)
@@ -476,6 +513,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.proposeSession(event)
 	case ProposeSet:
 		return n.proposeSet(event)
+	case ConfirmRead:
+		return n.confirmRead(event)
 	case PreVoteRequest:
 		return n.handlePreVoteRequest(event)
 	case PreVoteResponse:
@@ -578,14 +617,14 @@ func (n *Node) logEntriesPersisted(event LogEntriesPersisted) []Action {
 		if n.role != Leader || n.term != pending.term || n.lastLogIndex < pending.lastIndex {
 			return nil
 		}
-		return n.sendAppendEntries()
+		return n.sendAppendEntries(0)
 	case persistFollowerAppend:
 		if n.term != pending.term || n.role != Follower || n.leaderID != pending.leader {
 			return nil
 		}
 		return n.advanceFollowerCommit(
 			pending.leaderCommit,
-			n.appendEntriesResponse(pending.leader, true, pending.lastIndex),
+			n.appendEntriesResponse(pending.leader, true, pending.lastIndex, pending.readID),
 		)
 	default:
 		return nil
@@ -683,14 +722,25 @@ func (n *Node) proposeSet(proposal ProposeSet) []Action {
 	})...)
 }
 
+func (n *Node) confirmRead(read ConfirmRead) []Action {
+	if n.role != Leader {
+		return []Action{ReadRejected{ReadID: read.ReadID, LeaderID: n.leaderID}}
+	}
+	if !n.readReady {
+		return []Action{ReadRejected{ReadID: read.ReadID}}
+	}
+	n.pendingReads[read.ReadID] = &pendingRead{acknowledgements: map[NodeID]struct{}{n.id: {}}}
+	return n.sendAppendEntries(read.ReadID)
+}
+
 func (n *Node) heartbeatRound() []Action {
 	if n.role != Leader {
 		return nil
 	}
-	return append([]Action{ResetHeartbeatTimer{}}, n.sendAppendEntries()...)
+	return append([]Action{ResetHeartbeatTimer{}}, n.sendAppendEntries(0)...)
 }
 
-func (n *Node) sendAppendEntries() []Action {
+func (n *Node) sendAppendEntries(readID ReadID) []Action {
 	actions := make([]Action, 0, len(n.peers))
 	durableLastIndex := min(n.durableLogIndex, n.lastLogIndex)
 	for _, peer := range n.peers {
@@ -706,6 +756,7 @@ func (n *Node) sendAppendEntries() []Action {
 			PrevLogTerm:  n.termAt(prevIndex),
 			Entries:      n.entriesBetween(nextIndex, durableLastIndex),
 			LeaderCommit: n.commitIndex,
+			ReadID:       readID,
 		}
 		actions = append(actions, SendAppendEntries{To: peer, Request: request})
 	}
@@ -714,7 +765,7 @@ func (n *Node) sendAppendEntries() []Action {
 
 func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 	if request.Term < n.term {
-		return n.appendEntriesResponse(request.From, false, n.lastLogIndex)
+		return n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)
 	}
 	termChanged := request.Term > n.term
 	if termChanged {
@@ -727,7 +778,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 	n.recentLeaderContact = true
 	after := []Action{ResetElectionTimer{}}
 	if !n.matches(request.PrevLogIndex, request.PrevLogTerm) {
-		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
+		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)...)
 		if termChanged {
 			return n.persistHardState(after)
 		}
@@ -736,7 +787,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 
 	newEntries, truncateFrom, ok := n.entriesToAppend(request.PrevLogIndex, request.Entries)
 	if !ok {
-		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
+		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex, request.ReadID)...)
 		if termChanged {
 			return n.persistHardState(after)
 		}
@@ -754,6 +805,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 			truncateFrom: truncateFrom,
 			lastIndex:    n.lastLogIndex,
 			leaderCommit: request.LeaderCommit,
+			readID:       request.ReadID,
 		})...)
 	} else {
 		if n.lastLogIndex > n.durableLogIndex {
@@ -764,7 +816,7 @@ func (n *Node) handleAppendEntries(request AppendEntries) []Action {
 		}
 		after = append(after, n.advanceFollowerCommit(
 			request.LeaderCommit,
-			n.appendEntriesResponse(request.From, true, n.lastLogIndex),
+			n.appendEntriesResponse(request.From, true, n.lastLogIndex, request.ReadID),
 		)...)
 	}
 	if termChanged {
@@ -782,16 +834,28 @@ func (n *Node) handleAppendEntriesResponse(response AppendEntriesResponse) []Act
 		return nil
 	}
 	n.activePeers[response.From] = struct{}{}
-	if !response.Success {
-		return nil
-	}
-	if response.MatchIndex > n.matchIndex[response.From] {
+	if response.Success && response.MatchIndex > n.matchIndex[response.From] {
 		n.matchIndex[response.From] = response.MatchIndex
 	}
+	var actions []Action
 	if n.advanceLeaderCommit() {
-		return n.persistCommit(n.sendAppendEntries())
+		actions = n.persistCommit(n.sendAppendEntries(0))
 	}
-	return nil
+	return append(actions, n.acknowledgeRead(response)...)
+}
+
+func (n *Node) acknowledgeRead(response AppendEntriesResponse) []Action {
+	read := n.pendingReads[response.ReadID]
+	if response.ReadID == 0 || read == nil || read.confirmed {
+		return nil
+	}
+	read.acknowledgements[response.From] = struct{}{}
+	if len(read.acknowledgements) < n.quorum() {
+		return nil
+	}
+	read.confirmed = true
+	read.commitIndex = n.commitIndex
+	return n.completeReads()
 }
 
 func (n *Node) checkQuorum() []Action {
@@ -819,6 +883,7 @@ func (n *Node) becomeFollower(term uint64, leader NodeID) {
 	n.preVotes = make(map[NodeID]struct{})
 	n.activePeers = make(map[NodeID]struct{})
 	n.matchIndex = make(map[NodeID]uint64)
+	n.pendingReads = make(map[ReadID]*pendingRead)
 	n.readReady = false
 }
 
@@ -838,12 +903,13 @@ func (n *Node) voteResponse(to NodeID, granted bool) []Action {
 	return []Action{SendVoteResponse{To: to, Response: VoteResponse{From: n.id, Term: n.term, Granted: granted}}}
 }
 
-func (n *Node) appendEntriesResponse(to NodeID, success bool, matchIndex uint64) []Action {
+func (n *Node) appendEntriesResponse(to NodeID, success bool, matchIndex uint64, readID ReadID) []Action {
 	return []Action{SendAppendEntriesResponse{To: to, Response: AppendEntriesResponse{
 		From:       n.id,
 		Term:       n.term,
 		Success:    success,
 		MatchIndex: matchIndex,
+		ReadID:     readID,
 	}}}
 }
 
@@ -981,7 +1047,7 @@ func (n *Node) advanceFollowerCommit(leaderCommit uint64, after []Action) []Acti
 
 func (n *Node) applyThrough(index uint64) []Action {
 	if index <= n.lastApplied {
-		return nil
+		return n.completeReads()
 	}
 	actions := make([]Action, 0, index-n.lastApplied+1)
 	for n.lastApplied < index {
@@ -992,6 +1058,24 @@ func (n *Node) applyThrough(index uint64) []Action {
 			n.readReady = true
 			actions = append(actions, BecameReadReady{Term: n.term})
 		}
+	}
+	return append(actions, n.completeReads()...)
+}
+
+func (n *Node) completeReads() []Action {
+	var actions []Action
+	readIDs := make([]ReadID, 0, len(n.pendingReads))
+	for readID := range n.pendingReads {
+		readIDs = append(readIDs, readID)
+	}
+	sort.Slice(readIDs, func(i, j int) bool { return readIDs[i] < readIDs[j] })
+	for _, readID := range readIDs {
+		read := n.pendingReads[readID]
+		if !read.confirmed || n.lastApplied < read.commitIndex {
+			continue
+		}
+		actions = append(actions, ReadConfirmed{ReadID: readID, CommitIndex: read.commitIndex})
+		delete(n.pendingReads, readID)
 	}
 	return actions
 }

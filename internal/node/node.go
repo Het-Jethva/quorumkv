@@ -39,12 +39,15 @@ type Node struct {
 	events       chan raftInput
 	runtimeDone  chan struct{}
 	nextProposal atomic.Uint64
+	nextRead     atomic.Uint64
 }
 
 type raftInput struct {
 	event          raft.Event
 	result         chan proposalResult
 	requestContext context.Context
+	readResult     chan readResult
+	key            string
 }
 
 // New creates a node from an already validated configuration.

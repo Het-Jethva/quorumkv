@@ -70,6 +70,32 @@ func TestFollowerReturnsTypedLeaderHint(t *testing.T) {
 	t.Fatal("OpenSession() error has no typed NotLeader detail")
 }
 
+func TestGetFollowerReturnsTypedLeaderHint(t *testing.T) {
+	n := New(config.Config{
+		ClusterID: "cluster-1",
+		Node:      config.Node{ID: "node-1"},
+		Members: map[string]config.Member{
+			"node-1": {ClientAddress: "127.0.0.1:7401"},
+			"node-2": {ClientAddress: "127.0.0.1:7402"},
+			"node-3": {ClientAddress: "127.0.0.1:7403"},
+		},
+	})
+	n.publishRaftState(raft.State{ID: "node-1", Role: raft.Follower, LeaderID: "node-2", Term: 3})
+
+	_, err := n.Get(context.Background(), &quorumkvv1.GetRequest{Key: "key"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Get() error = %v, want FailedPrecondition", err)
+	}
+	details := status.Convert(err).Details()
+	if len(details) != 1 {
+		t.Fatalf("Get() details = %#v, want typed NotLeader", details)
+	}
+	notLeader, ok := details[0].(*quorumkvv1.NotLeader)
+	if !ok || notLeader.LeaderId != "node-2" || notLeader.LeaderAddress != "127.0.0.1:7402" {
+		t.Fatalf("Get() NotLeader detail = %#v, want node-2 address", details[0])
+	}
+}
+
 func TestSessionMachineStoresCopiedOpaqueAndEmptyValuesInSequence(t *testing.T) {
 	machine := newSessionMachine(1)
 	sessionID := raft.SessionID{1}
@@ -162,5 +188,15 @@ func TestSetRejectsInvalidInputBeforeProposal(t *testing.T) {
 				t.Fatalf("Set() error = %v, want InvalidArgument", err)
 			}
 		})
+	}
+}
+
+func TestGetRejectsInvalidKeyBeforeReadConfirmation(t *testing.T) {
+	n := New(config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1"}})
+	for _, key := range []string{"", string([]byte{0xff}), strings.Repeat("k", maxKeyBytes+1)} {
+		_, err := n.Get(context.Background(), &quorumkvv1.GetRequest{Key: key})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("Get(%q) error = %v, want InvalidArgument", key, err)
+		}
 	}
 }
