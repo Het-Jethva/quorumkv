@@ -42,6 +42,20 @@ message SetRequest {
 
 message SetResponse {}
 
+// StaleSequence identifies a mutation older than the latest mutation whose
+// result the Cluster retains for this Client Session.
+message StaleSequence {
+  uint64 received_sequence = 1;
+  uint64 last_sequence = 2;
+}
+
+// OutOfOrderSequence identifies a mutation that skipped the next sequence for
+// its Client Session.
+message OutOfOrderSequence {
+  uint64 received_sequence = 1;
+  uint64 next_sequence = 2;
+}
+
 // NotLeader is attached to a FailedPrecondition status when the receiving
 // Node knows where the client should retry directly.
 message NotLeader {

@@ -24,10 +24,12 @@ const (
 )
 
 type proposalResult struct {
-	sessionID raft.SessionID
-	failure   sessionFailure
-	leaderID  raft.NodeID
-	rejected  bool
+	sessionID    raft.SessionID
+	failure      sessionFailure
+	sequence     uint64
+	wantSequence uint64
+	leaderID     raft.NodeID
+	rejected     bool
 }
 
 type sessionState uint8
@@ -47,8 +49,9 @@ type sessionMachine struct {
 }
 
 type sessionRecord struct {
-	state        sessionState
-	lastSequence uint64
+	state              sessionState
+	lastSequence       uint64
+	lastMutationResult sessionFailure
 }
 
 func newSessionMachine(limit int) *sessionMachine {
@@ -87,30 +90,49 @@ func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
 		m.active--
 		return result
 	case raft.EntrySet:
-		record, exists := m.sessions[entry.SessionID]
-		if !exists {
-			result.failure = sessionUnknown
+		result, apply := m.evaluateSet(entry.SessionID, entry.Sequence)
+		if !apply {
 			return result
 		}
-		if record.state == sessionPermanentlyClosed {
-			result.failure = sessionClosed
-			return result
-		}
-		if entry.Sequence <= record.lastSequence {
-			result.failure = sessionStaleSequence
-			return result
-		}
-		if entry.Sequence != record.lastSequence+1 {
-			result.failure = sessionOutOfOrderSequence
-			return result
-		}
+		record := m.sessions[entry.SessionID]
 		m.values[entry.Key] = append([]byte(nil), entry.Value...)
 		record.lastSequence = entry.Sequence
+		record.lastMutationResult = result.failure
 		m.sessions[entry.SessionID] = record
 		return result
 	default:
 		panic(fmt.Sprintf("apply unsupported Raft entry type %d", entry.Type))
 	}
+}
+
+// evaluateSet decides whether a SET is the next mutation to apply. The latest
+// sequence replays its cached result, so a retry never creates a second effect.
+func (m *sessionMachine) evaluateSet(sessionID raft.SessionID, sequence uint64) (proposalResult, bool) {
+	result := proposalResult{sessionID: sessionID, sequence: sequence}
+	record, exists := m.sessions[sessionID]
+	if !exists {
+		result.failure = sessionUnknown
+		return result, false
+	}
+	if record.state == sessionPermanentlyClosed {
+		result.failure = sessionClosed
+		return result, false
+	}
+	if sequence == record.lastSequence && sequence != 0 {
+		result.failure = record.lastMutationResult
+		return result, false
+	}
+	if sequence < record.lastSequence {
+		result.failure = sessionStaleSequence
+		result.wantSequence = record.lastSequence
+		return result, false
+	}
+	if sequence != record.lastSequence+1 {
+		result.failure = sessionOutOfOrderSequence
+		result.wantSequence = record.lastSequence + 1
+		return result, false
+	}
+	return result, true
 }
 
 func (n *Node) OpenSession(ctx context.Context, _ *quorumkvv1.OpenSessionRequest) (*quorumkvv1.OpenSessionResponse, error) {
@@ -188,9 +210,19 @@ func (n *Node) proposalError(result proposalResult) error {
 	case sessionAlreadyExists:
 		return status.Error(codes.AlreadyExists, "Client Session identity was already used and cannot be reopened")
 	case sessionStaleSequence:
-		return status.Error(codes.FailedPrecondition, "mutation sequence is stale")
+		base := status.New(codes.FailedPrecondition, fmt.Sprintf("mutation sequence %d is stale; latest is %d", result.sequence, result.wantSequence))
+		withDetails, err := base.WithDetails(&quorumkvv1.StaleSequence{ReceivedSequence: result.sequence, LastSequence: result.wantSequence})
+		if err != nil {
+			return base.Err()
+		}
+		return withDetails.Err()
 	case sessionOutOfOrderSequence:
-		return status.Error(codes.FailedPrecondition, "mutation sequence is out of order")
+		base := status.New(codes.FailedPrecondition, fmt.Sprintf("mutation sequence %d is out of order; next is %d", result.sequence, result.wantSequence))
+		withDetails, err := base.WithDetails(&quorumkvv1.OutOfOrderSequence{ReceivedSequence: result.sequence, NextSequence: result.wantSequence})
+		if err != nil {
+			return base.Err()
+		}
+		return withDetails.Err()
 	default:
 		return status.Error(codes.Internal, "Client Session command returned an unknown result")
 	}

@@ -91,11 +91,49 @@ func TestSessionMachineStoresCopiedOpaqueAndEmptyValuesInSequence(t *testing.T) 
 	if value, exists := machine.values["empty"]; !exists || len(value) != 0 {
 		t.Fatalf("stored empty Value = %v, exists=%v; want present empty Value", value, exists)
 	}
-	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 2, Key: "stale"}); result.failure != sessionStaleSequence {
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 2, Key: "duplicate", Value: []byte("must not apply")}); result.failure != sessionSucceeded {
+		t.Fatalf("apply duplicate latest SET = %v, want cached success", result.failure)
+	}
+	if _, exists := machine.values["duplicate"]; exists {
+		t.Fatal("duplicate latest SET created a second effect")
+	}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 1, Key: "stale"}); result.failure != sessionStaleSequence {
 		t.Fatalf("apply stale SET = %v, want stale sequence", result.failure)
 	}
 	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 4, Key: "gap"}); result.failure != sessionOutOfOrderSequence {
 		t.Fatalf("apply skipped SET = %v, want out-of-order sequence", result.failure)
+	}
+}
+
+func TestSequenceFailuresHaveDistinctTypedDetails(t *testing.T) {
+	n := New(config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1"}})
+	tests := []struct {
+		name   string
+		result proposalResult
+		detail any
+	}{
+		{
+			name:   "stale",
+			result: proposalResult{failure: sessionStaleSequence, sequence: 1, wantSequence: 2},
+			detail: &quorumkvv1.StaleSequence{},
+		},
+		{
+			name:   "out of order",
+			result: proposalResult{failure: sessionOutOfOrderSequence, sequence: 4, wantSequence: 3},
+			detail: &quorumkvv1.OutOfOrderSequence{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := n.proposalError(test.result)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("proposal error = %v, want FailedPrecondition", err)
+			}
+			details := status.Convert(err).Details()
+			if len(details) != 1 || reflect.TypeOf(details[0]) != reflect.TypeOf(test.detail) {
+				t.Fatalf("proposal details = %#v, want %T", details, test.detail)
+			}
+		})
 	}
 }
 

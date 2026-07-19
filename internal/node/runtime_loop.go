@@ -47,11 +47,24 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		result chan proposalResult
 		ctx    context.Context
 	}
-	pending := make(map[uint64]pendingProposal)
+	type inFlightMutation struct {
+		sequence uint64
+		index    uint64
+	}
+	pending := make(map[uint64][]pendingProposal)
+	inFlightMutations := make(map[raft.SessionID]inFlightMutation)
 	for {
-		for index, proposal := range pending {
-			if proposal.ctx.Err() != nil {
+		for index, proposals := range pending {
+			active := proposals[:0]
+			for _, proposal := range proposals {
+				if proposal.ctx.Err() == nil {
+					active = append(active, proposal)
+				}
+			}
+			if len(active) == 0 {
 				delete(pending, index)
+			} else {
+				pending[index] = active
 			}
 		}
 		var event raft.Event
@@ -72,6 +85,18 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			event = raft.CheckQuorumTimeout{}
 		}
 
+		if set, ok := event.(raft.ProposeSet); ok {
+			if mutation, exists := inFlightMutations[set.SessionID]; exists && mutation.sequence == set.Sequence {
+				pending[mutation.index] = append(pending[mutation.index], pendingProposal{result: proposalResults, ctx: proposalContext})
+				continue
+			}
+			if result, shouldPropose := sessions.evaluateSet(set.SessionID, set.Sequence); !shouldPropose {
+				proposalResults <- result
+				continue
+			}
+		}
+
+		wasLeader := runtime.core.State().Role == raft.Leader
 		actions, err := runtime.step(event)
 		if err != nil {
 			return err
@@ -93,7 +118,10 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				quorumTimer, quorumC = resetOptionalTimer(quorumTimer, checkQuorumWindow)
 			case raft.ProposalAccepted:
 				if proposalResults != nil && proposalContext != nil {
-					pending[action.Index] = pendingProposal{result: proposalResults, ctx: proposalContext}
+					pending[action.Index] = append(pending[action.Index], pendingProposal{result: proposalResults, ctx: proposalContext})
+				}
+				if set, ok := event.(raft.ProposeSet); ok {
+					inFlightMutations[set.SessionID] = inFlightMutation{sequence: set.Sequence, index: action.Index}
 				}
 			case raft.ProposalRejected:
 				if proposalResults != nil {
@@ -101,8 +129,13 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				}
 			case raft.ApplyEntry:
 				result := sessions.apply(action.Entry)
-				if proposal, ok := pending[action.Entry.Index]; ok {
-					proposal.result <- result
+				if action.Entry.Type == raft.EntrySet && inFlightMutations[action.Entry.SessionID].sequence == action.Entry.Sequence {
+					delete(inFlightMutations, action.Entry.SessionID)
+				}
+				if proposals, ok := pending[action.Entry.Index]; ok {
+					for _, proposal := range proposals {
+						proposal.result <- result
+					}
 					delete(pending, action.Entry.Index)
 				}
 			case raft.BecameLeader, raft.BecameReadReady, raft.LostLeadership:
@@ -111,6 +144,15 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		}
 
 		state := runtime.core.State()
+		if wasLeader && state.Role != raft.Leader {
+			for index, proposals := range pending {
+				for _, proposal := range proposals {
+					proposal.result <- proposalResult{leaderID: state.LeaderID, rejected: true}
+				}
+				delete(pending, index)
+			}
+			clear(inFlightMutations)
+		}
 		if state.Role != raft.Leader {
 			stopTimer(heartbeatTimer)
 			stopTimer(quorumTimer)

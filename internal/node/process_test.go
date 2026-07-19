@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,12 +19,181 @@ import (
 	"github.com/Het-Jethva/quorumkv/internal/cli"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/node"
+	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/wal"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
 )
 
 const processTestDeadline = 30 * time.Second
+
+func TestLostSetResponseIsDeduplicatedAfterLeaderFailover(t *testing.T) {
+	members := make(map[string]config.Member, 3)
+	configs := make(map[string]config.Config, 3)
+	processes := make(map[string]*nodeProcess, 3)
+	for index := 1; index <= 3; index++ {
+		members[fmt.Sprintf("node-%d", index)] = config.Member{
+			PeerAddress:   unusedAddress(t),
+			ClientAddress: unusedAddress(t),
+		}
+	}
+	for index := 1; index <= 3; index++ {
+		id := fmt.Sprintf("node-%d", index)
+		cfg := config.Config{
+			Version:            1,
+			ClusterID:          "deduplication-process-test",
+			ActiveSessionLimit: 1,
+			Node:               config.Node{ID: id, DataDir: filepath.Join(t.TempDir(), id)},
+			Members:            members,
+		}
+		configs[id] = cfg
+		processes[id] = startNodeProcess(t, cfg)
+	}
+	defer func() {
+		for _, process := range processes {
+			process.stop()
+		}
+	}()
+
+	leader := waitForStableLeader(t, members, nil, processTestDeadline)
+	requestCtx, cancel := context.WithTimeout(context.Background(), processTestDeadline)
+	sessionID, err := client.New(members[leader].ClientAddress).OpenSession(requestCtx)
+	cancel()
+	if err != nil {
+		t.Fatalf("open Client Session: %v", err)
+	}
+
+	proxyAddress, stopProxy := startLostSetResponseProxy(t, members[leader].ClientAddress)
+	connection, err := grpc.NewClient(proxyAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("connect to response-dropping proxy: %v", err)
+	}
+	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = quorumkvv1.NewClientServiceClient(connection).Set(requestCtx, &quorumkvv1.SetRequest{
+		SessionId: sessionID[:], Sequence: 1, Key: "deduplicated", Value: []byte("original"),
+	})
+	cancel()
+	connection.Close()
+	stopProxy()
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("SET through response-dropping proxy error = %v, want Unavailable after upstream success", err)
+	}
+
+	processes[leader].stop()
+	delete(processes, leader)
+	replacement := waitForStableLeader(t, members, map[string]bool{leader: true}, processTestDeadline)
+	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	err = client.New(members[replacement].ClientAddress).Set(requestCtx, sessionID, 1, "deduplicated", []byte("different retry payload"))
+	cancel()
+	if err != nil {
+		t.Fatalf("retry lost-response SET through replacement Leader: %v", err)
+	}
+
+	// With one Follower stopped, sequence 2 remains in flight. Sequence 3 must
+	// be rejected immediately instead of creating a second Session mutation.
+	remainingFollower := memberOtherThan(t, members, map[string]bool{leader: true, replacement: true})
+	remainingFollowerID := memberIDForAddress(t, members, remainingFollower.ClientAddress)
+	processes[remainingFollowerID].stop()
+	delete(processes, remainingFollowerID)
+	firstDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		firstDone <- client.New(members[replacement].ClientAddress).Set(ctx, sessionID, 2, "pending", []byte("value"))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	connection, err = grpc.NewClient(members[replacement].ClientAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("connect to isolated Leader: %v", err)
+	}
+	requestCtx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, err = quorumkvv1.NewClientServiceClient(connection).Set(requestCtx, &quorumkvv1.SetRequest{
+		SessionId: sessionID[:], Sequence: 3, Key: "must-not-start", Value: []byte("value"),
+	})
+	cancel()
+	connection.Close()
+	if status.Code(err) != codes.FailedPrecondition || !hasOutOfOrderSequenceDetail(err, 3, 2) {
+		t.Fatalf("second in-flight mutation error = %v, want typed OutOfOrderSequence with next sequence 2", err)
+	}
+	<-firstDone
+
+	for id, process := range processes {
+		process.stop()
+		delete(processes, id)
+	}
+	nodesWithEffect := 0
+	for id, cfg := range configs {
+		store, recovered, err := wal.Open(cfg.Node.DataDir, wal.Identity{ClusterID: cfg.ClusterID, NodeID: id})
+		if err != nil {
+			t.Fatalf("recover Node %q WAL: %v", id, err)
+		}
+		store.Close()
+		effects := 0
+		for _, entry := range recovered.Log {
+			if entry.Type == wal.EntryType(raft.EntrySet) && entry.SessionID == sessionID && entry.Sequence == 1 {
+				effects++
+			}
+		}
+		if effects > 1 {
+			t.Fatalf("Node %q WAL contains %d entries for the retried logical mutation, want at most one", id, effects)
+		}
+		if effects == 1 {
+			nodesWithEffect++
+		}
+	}
+	if nodesWithEffect < 2 {
+		t.Fatalf("retried logical mutation is present on %d Nodes, want a durable Quorum", nodesWithEffect)
+	}
+}
+
+type lostSetResponseProxy struct {
+	quorumkvv1.UnimplementedClientServiceServer
+	target string
+}
+
+func (p *lostSetResponseProxy) Set(ctx context.Context, request *quorumkvv1.SetRequest) (*quorumkvv1.SetResponse, error) {
+	connection, err := grpc.NewClient(p.target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	if _, err := quorumkvv1.NewClientServiceClient(connection).Set(ctx, request); err != nil {
+		return nil, err
+	}
+	return nil, status.Error(codes.Unavailable, "test proxy dropped the successful SET response")
+}
+
+func startLostSetResponseProxy(t *testing.T, target string) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for response-dropping proxy: %v", err)
+	}
+	server := grpc.NewServer()
+	quorumkvv1.RegisterClientServiceServer(server, &lostSetResponseProxy{target: target})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.Serve(listener)
+	}()
+	return listener.Addr().String(), func() {
+		server.Stop()
+		<-done
+	}
+}
+
+func hasOutOfOrderSequenceDetail(err error, received, next uint64) bool {
+	for _, detail := range status.Convert(err).Details() {
+		outOfOrder, ok := detail.(*quorumkvv1.OutOfOrderSequence)
+		if ok && outOfOrder.ReceivedSequence == received && outOfOrder.NextSequence == next {
+			return true
+		}
+	}
+	return false
+}
 
 func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	members := make(map[string]config.Member, 3)
