@@ -46,6 +46,53 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		sessions.apply(apply.Entry)
 	}
 	n.publishRaftState(runtime.core.State())
+
+	type snapshotCompletion struct {
+		index uint64
+		err   error
+	}
+	snapshotDone := make(chan snapshotCompletion, 1)
+	snapshotRunning := false
+	snapshotAutomatic := false
+	var snapshotWaiters []chan error
+	var lastSnapshotIndex uint64
+	if runtime.recoveredSnapshot != nil {
+		lastSnapshotIndex = runtime.recoveredSnapshot.IncludedIndex
+	}
+	startSnapshot := func(waiter chan error, automatic bool) {
+		if waiter != nil {
+			snapshotWaiters = append(snapshotWaiters, waiter)
+		}
+		if snapshotRunning {
+			return
+		}
+		state := runtime.core.State()
+		captured := sessions.snapshot(snapshotIdentity(n.config), state.LastApplied, state.LastAppliedTerm)
+		snapshotRunning = true
+		snapshotAutomatic = automatic
+		go func() {
+			snapshotDone <- snapshotCompletion{
+				index: captured.IncludedIndex,
+				err:   installSnapshot(n.config.Node.DataDir, captured, runtime.wal),
+			}
+		}()
+	}
+	finishSnapshot := func(completion snapshotCompletion) {
+		for _, waiter := range snapshotWaiters {
+			waiter <- completion.err
+		}
+		snapshotWaiters = nil
+		snapshotRunning = false
+		if completion.err == nil && completion.index > lastSnapshotIndex {
+			lastSnapshotIndex = completion.index
+		}
+	}
+	defer func() {
+		if snapshotRunning {
+			finishSnapshot(<-snapshotDone)
+		}
+	}()
+
 	type pendingProposal struct {
 		result chan proposalResult
 		ctx    context.Context
@@ -88,10 +135,20 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		var readKey string
 		select {
 		case <-ctx.Done():
+			if snapshotRunning {
+				finishSnapshot(<-snapshotDone)
+			}
 			return nil
+		case completion := <-snapshotDone:
+			wasAutomatic := snapshotAutomatic
+			finishSnapshot(completion)
+			if completion.err != nil && wasAutomatic {
+				return fmt.Errorf("automatic Snapshot: %w", completion.err)
+			}
+			continue
 		case input := <-n.events:
 			if input.snapshotResult != nil {
-				input.snapshotResult <- saveSnapshot(n.config, runtime.core.State(), sessions)
+				startSnapshot(input.snapshotResult, false)
 				continue
 			}
 			event = input.event
@@ -222,6 +279,10 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			heartbeatC, quorumC = nil, nil
 		}
 		n.publishRaftState(state)
+		threshold := uint64(n.config.EffectiveSnapshotThresholdBytes())
+		if !snapshotRunning && state.LastApplied > lastSnapshotIndex && runtime.wal.RetainedLogBytes(state.LastApplied) >= threshold {
+			startSnapshot(nil, true)
+		}
 	}
 }
 

@@ -137,6 +137,71 @@ func TestWALRecoversCommittedPrefixAcrossTruncationAndReplacement(t *testing.T) 
 	}
 }
 
+func TestWALCompactionPreservesRecoveryAcrossPartialSegmentDeletion(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := open(directory, identity, 180)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveHardState(HardState{Term: 3, VotedFor: "node-2"}); err != nil {
+		t.Fatalf("save hard state: %v", err)
+	}
+	for index := uint64(1); index <= 7; index++ {
+		if err := store.SaveLogEntries([]LogEntry{{Index: index, Term: 3, Key: fmt.Sprintf("key-%d", index), Value: make([]byte, 32)}}); err != nil {
+			t.Fatalf("save log entry %d: %v", index, err)
+		}
+	}
+	if err := store.SaveCommitIndex(7); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	before, err := findSegments(directory)
+	if err != nil {
+		t.Fatalf("find WAL segments before compaction: %v", err)
+	}
+	backups := make(map[string][]byte, len(before))
+	for _, segment := range before {
+		backups[filepath.Base(segment.path)] = readFile(t, segment.path)
+	}
+	if err := store.Compact(5, 3); err != nil {
+		t.Fatalf("compact WAL: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close compacted WAL: %v", err)
+	}
+	after, err := findSegments(directory)
+	if err != nil {
+		t.Fatalf("find compacted WAL segments: %v", err)
+	}
+	if len(after) >= len(before) {
+		t.Fatalf("WAL segments after compaction = %d, before = %d; want at least one covered segment deleted", len(after), len(before))
+	}
+
+	// Restoring one deleted segment models a crash between segment deletions.
+	// The synced checkpoint must make both the partial and complete deletion
+	// layouts recover to the same retained suffix.
+	for name, contents := range backups {
+		path := filepath.Join(directory, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
+				t.Fatalf("restore one segment for crash point: %v", err)
+			}
+			break
+		}
+	}
+	reopened, recovered, err := open(directory, identity, 180)
+	if err != nil {
+		t.Fatalf("recover partially deleted compacted WAL: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 5 || recovered.SnapshotTerm != 3 || recovered.CommitIndex != 7 || recovered.HardState != (HardState{Term: 3, VotedFor: "node-2"}) {
+		t.Fatalf("recovered compacted metadata = %#v, want Snapshot 5/3, commit 7, and hard state", recovered)
+	}
+	if len(recovered.Log) != 2 || recovered.Log[0].Index != 6 || recovered.Log[1].Index != 7 {
+		t.Fatalf("recovered retained suffix = %#v, want indexes 6 and 7", recovered.Log)
+	}
+}
+
 func TestWALRejectsConfiguredIdentityMismatch(t *testing.T) {
 	directory := t.TempDir()
 	wal, _, err := Open(directory, Identity{ClusterID: "cluster-1", NodeID: "node-1"})

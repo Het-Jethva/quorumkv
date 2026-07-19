@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,8 @@ func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T
 		id := fmt.Sprintf("node-%d", index)
 		configs[id] = config.Config{
 			Version: 1, ClusterID: "snapshot-restart-test", ActiveSessionLimit: 2,
-			Node: config.Node{ID: id, DataDir: t.TempDir()}, Members: members,
+			SnapshotThresholdBytes: 200,
+			Node:                   config.Node{ID: id, DataDir: t.TempDir()}, Members: members,
 		}
 		addresses = append(addresses, members[id].ClientAddress)
 	}
@@ -86,8 +88,30 @@ func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T
 	}
 	requestCancel()
 
-	// Each runtime captures only state it has applied. Any committed entries not
-	// yet applied at this barrier remain in the WAL suffix and are replayed.
+	// The small retained-byte threshold causes each apply loop to clone state
+	// and install a Snapshot without a manual barrier.
+	for id, cfg := range configs {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			matches, err := filepath.Glob(filepath.Join(cfg.Node.DataDir, "snapshot-*.qsnap"))
+			if err != nil {
+				stop(cancel, results)
+				t.Fatalf("find automatic Snapshot on %s: %v", id, err)
+			}
+			if len(matches) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				stop(cancel, results)
+				t.Fatalf("automatic Snapshot was not installed on %s", id)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// The same path remains manually triggerable for tests and demos. Each
+	// runtime captures only its applied state; later committed entries remain in
+	// the WAL suffix and are replayed.
 	for id, running := range nodes {
 		ctx, cancelSnapshot := context.WithTimeout(context.Background(), 5*time.Second)
 		err := running.CreateSnapshot(ctx)

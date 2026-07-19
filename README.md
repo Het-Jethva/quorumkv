@@ -22,4 +22,6 @@ The client endpoint implements the versioned `quorumkv.v1.NodeService` status AP
 
 Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available. Peer handshakes fail closed on protocol, Cluster Identity, or Node Identity mismatches.
 
+Each Node automatically creates a Snapshot after retained committed-and-applied WAL entry frames reach `snapshot_threshold_bytes` (64 MiB when omitted). Snapshot file encoding and syncing run from an immutable apply-loop clone, so later commands continue while one Snapshot is in progress. Covered complete WAL segments are removed only after the Snapshot and a recovery checkpoint are durable. Tests and demos can also call `Node.CreateSnapshot` to trigger the same path manually.
+
 The Node stops gracefully when its context is canceled or it receives `SIGINT`/`SIGTERM`.

@@ -12,12 +12,15 @@ import (
 )
 
 // Config contains the static identity and local settings for one node.
+const DefaultSnapshotThresholdBytes = int64(64 << 20)
+
 type Config struct {
-	Version            int               `yaml:"version"`
-	ClusterID          string            `yaml:"cluster_id"`
-	ActiveSessionLimit int               `yaml:"active_session_limit"`
-	Node               Node              `yaml:"node"`
-	Members            map[string]Member `yaml:"members"`
+	Version                int               `yaml:"version"`
+	ClusterID              string            `yaml:"cluster_id"`
+	ActiveSessionLimit     int               `yaml:"active_session_limit"`
+	SnapshotThresholdBytes int64             `yaml:"snapshot_threshold_bytes,omitempty"`
+	Node                   Node              `yaml:"node"`
+	Members                map[string]Member `yaml:"members"`
 }
 
 // Node contains settings owned by this process.
@@ -69,6 +72,9 @@ func (c Config) Validate() error {
 	} else if uint64(c.ActiveSessionLimit) > uint64(^uint32(0)) {
 		problems = append(problems, errors.New("active_session_limit exceeds the v1 protocol limit"))
 	}
+	if c.SnapshotThresholdBytes < 0 {
+		problems = append(problems, errors.New("snapshot_threshold_bytes must not be negative"))
+	}
 	if strings.TrimSpace(c.Node.ID) == "" {
 		problems = append(problems, errors.New("node.id is required"))
 	}
@@ -109,6 +115,15 @@ func (c Config) Validate() error {
 
 // LocalMember returns this process's addresses from the shared member map.
 func (c Config) LocalMember() Member { return c.Members[c.Node.ID] }
+
+// EffectiveSnapshotThresholdBytes returns the configured automatic Snapshot
+// threshold, or the v1 default when the setting is omitted.
+func (c Config) EffectiveSnapshotThresholdBytes() int64 {
+	if c.SnapshotThresholdBytes == 0 {
+		return DefaultSnapshotThresholdBytes
+	}
+	return c.SnapshotThresholdBytes
+}
 
 func validateAddress(name, address string) error {
 	if strings.TrimSpace(address) == "" {

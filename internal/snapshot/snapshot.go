@@ -50,9 +50,12 @@ type State struct {
 
 // Compatibility describes the durable WAL history a Snapshot must match.
 type Compatibility struct {
-	Identity    Identity
-	CommitIndex uint64
-	LogTerms    []uint64
+	Identity      Identity
+	CommitIndex   uint64
+	LogStartIndex uint64
+	LogTerms      []uint64
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
 }
 
 // Save writes and syncs a temporary file before atomically installing a
@@ -246,10 +249,21 @@ func matchesWAL(state State, compatibility Compatibility) bool {
 	if state.IncludedIndex == 0 {
 		return state.IncludedTerm == 0
 	}
-	if state.IncludedIndex > uint64(len(compatibility.LogTerms)) {
+	if state.IncludedIndex == compatibility.SnapshotIndex {
+		return state.IncludedTerm == compatibility.SnapshotTerm
+	}
+	start := compatibility.LogStartIndex
+	if start == 0 {
+		start = 1
+	}
+	if state.IncludedIndex < start {
 		return false
 	}
-	return compatibility.LogTerms[state.IncludedIndex-1] == state.IncludedTerm
+	offset := state.IncludedIndex - start
+	if offset >= uint64(len(compatibility.LogTerms)) {
+		return false
+	}
+	return compatibility.LogTerms[offset] == state.IncludedTerm
 }
 
 func equalIdentity(left, right Identity) bool {
