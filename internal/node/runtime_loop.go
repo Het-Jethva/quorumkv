@@ -31,6 +31,9 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 
 	n.publishRaftState(runtime.core.State())
 	sessions := newSessionMachine(n.config.ActiveSessionLimit)
+	if err := sessions.restore(runtime.recoveredSnapshot); err != nil {
+		return fmt.Errorf("restore replicated Snapshot state: %w", err)
+	}
 	recovery, err := runtime.step(raft.RecoverCommitted{})
 	if err != nil {
 		return err
@@ -87,6 +90,10 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		case <-ctx.Done():
 			return nil
 		case input := <-n.events:
+			if input.snapshotResult != nil {
+				input.snapshotResult <- saveSnapshot(n.config, runtime.core.State(), sessions)
+				continue
+			}
 			event = input.event
 			proposalResults = input.result
 			proposalContext = input.requestContext

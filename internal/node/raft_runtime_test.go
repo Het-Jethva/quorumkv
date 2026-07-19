@@ -9,6 +9,7 @@ import (
 
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/snapshot"
 	"github.com/Het-Jethva/quorumkv/internal/wal"
 )
 
@@ -111,6 +112,71 @@ func TestRaftRuntimeReplaysOnlyDurableCommittedPrefix(t *testing.T) {
 	}
 	if state := runtime.core.State(); state.CommitIndex != 3 || state.LastApplied != 3 || state.LastLogIndex != 4 {
 		t.Fatalf("recovered Raft state = %#v, want applied through 3 with log through 4", state)
+	}
+}
+
+func TestRaftRuntimeRestoresSnapshotThenReplaysCommittedSuffix(t *testing.T) {
+	directory := t.TempDir()
+	members := map[string]config.Member{"node-1": {}, "node-2": {}, "node-3": {}}
+	cfg := config.Config{
+		ClusterID: "cluster-1", ActiveSessionLimit: 1,
+		Node: config.Node{ID: "node-1", DataDir: directory}, Members: members,
+	}
+	sessionID := [16]byte{1}
+	store, _, err := wal.Open(directory, wal.Identity{ClusterID: cfg.ClusterID, NodeID: cfg.Node.ID})
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]wal.LogEntry{
+		{Index: 1, Term: 1, Type: wal.EntryType(raft.EntryOpenSession), SessionID: sessionID},
+		{Index: 2, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 1, Key: "deleted", Value: []byte("from Snapshot")},
+		{Index: 3, Term: 2, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 2, Key: "retained", Value: []byte("from suffix")},
+		{Index: 4, Term: 2, Type: wal.EntryType(raft.EntryDelete), SessionID: sessionID, Sequence: 3, Key: "deleted"},
+	}); err != nil {
+		t.Fatalf("save log: %v", err)
+	}
+	if err := store.SaveCommitIndex(4); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+	_, err = snapshot.Save(directory, snapshot.State{
+		Identity: snapshotIdentity(cfg), IncludedIndex: 2, IncludedTerm: 1,
+		Values:   map[string][]byte{"deleted": []byte("from Snapshot")},
+		Sessions: []snapshot.Session{{ID: sessionID, LastSequence: 1}},
+	})
+	if err != nil {
+		t.Fatalf("save Snapshot: %v", err)
+	}
+
+	runtime, err := openRaftRuntime(cfg, []raft.NodeID{"node-2", "node-3"})
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer runtime.close()
+	machine := newSessionMachine(cfg.ActiveSessionLimit)
+	if err := machine.restore(runtime.recoveredSnapshot); err != nil {
+		t.Fatalf("restore Snapshot state: %v", err)
+	}
+	actions, err := runtime.step(raft.RecoverCommitted{})
+	if err != nil {
+		t.Fatalf("recover committed suffix: %v", err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("recovery emitted %d actions, want two suffix entries", len(actions))
+	}
+	for _, action := range actions {
+		machine.apply(action.(raft.ApplyEntry).Entry)
+	}
+	if _, found := machine.get("deleted"); found {
+		t.Fatal("committed WAL suffix did not delete Snapshot Value")
+	}
+	if value, found := machine.get("retained"); !found || string(value) != "from suffix" {
+		t.Fatalf("retained Value = %q, found %v; want committed suffix Value", value, found)
+	}
+	if result, apply := machine.evaluateMutation(raft.SessionID(sessionID), 3); apply || !result.existed {
+		t.Fatalf("duplicate recovered DELETE = (%#v, apply %v), want cached existed result", result, apply)
 	}
 }
 

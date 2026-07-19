@@ -7,6 +7,30 @@ import (
 	"github.com/Het-Jethva/quorumkv/internal/raft"
 )
 
+func TestRecoveryAppliesOnlyCommittedSuffixAfterSnapshot(t *testing.T) {
+	entries := []raft.LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 2},
+		{Index: 4, Term: 2},
+		{Index: 5, Term: 2},
+	}
+	node := raft.NewNodeFromRecoveredState("node-1", []raft.NodeID{"node-2", "node-3"}, raft.RecoveredState{
+		Log: entries, CommitIndex: 4, SnapshotIndex: 2,
+	})
+	actions := node.Step(raft.RecoverCommitted{})
+	want := []raft.Action{
+		raft.ApplyEntry{Entry: entries[2]},
+		raft.ApplyEntry{Entry: entries[3]},
+	}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("recovery actions = %#v, want committed suffix %#v", actions, want)
+	}
+	if state := node.State(); state.LastApplied != 4 || state.LastAppliedTerm != 2 {
+		t.Fatalf("recovered apply position = %d/%d, want 4/2", state.LastApplied, state.LastAppliedTerm)
+	}
+}
+
 func TestPreVoteDoesNotChangeTermAndElectionWaitsForPersistentSelfVote(t *testing.T) {
 	node := raft.NewNode("node-1", []raft.NodeID{"node-3", "node-2"})
 

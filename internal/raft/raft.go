@@ -354,16 +354,17 @@ func (ReadRejected) isAction() {}
 
 // State is a read-only snapshot used by runtimes and deterministic assertions.
 type State struct {
-	ID           NodeID
-	Role         Role
-	Term         uint64
-	VotedFor     NodeID
-	LeaderID     NodeID
-	LastLogIndex uint64
-	LastLogTerm  uint64
-	CommitIndex  uint64
-	LastApplied  uint64
-	ReadReady    bool
+	ID              NodeID
+	Role            Role
+	Term            uint64
+	VotedFor        NodeID
+	LeaderID        NodeID
+	LastLogIndex    uint64
+	LastLogTerm     uint64
+	CommitIndex     uint64
+	LastApplied     uint64
+	LastAppliedTerm uint64
+	ReadReady       bool
 }
 
 // HardState is the election state restored before a Node processes events.
@@ -373,11 +374,13 @@ type HardState struct {
 }
 
 // RecoveredState is the durable consensus state restored by the runtime.
-// lastApplied is intentionally absent and is reconstructed by RecoverCommitted.
+// SnapshotIndex is already represented in the restored state machine;
+// RecoverCommitted emits only the later committed WAL suffix.
 type RecoveredState struct {
-	HardState   HardState
-	Log         []LogEntry
-	CommitIndex uint64
+	HardState     HardState
+	Log           []LogEntry
+	CommitIndex   uint64
+	SnapshotIndex uint64
 }
 
 type pendingHardStatePersistence struct {
@@ -493,6 +496,7 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		durableVotedFor:    recovered.HardState.VotedFor,
 		commitIndex:        recovered.CommitIndex,
 		durableCommitIndex: recovered.CommitIndex,
+		lastApplied:        recovered.SnapshotIndex,
 		votes:              make(map[NodeID]struct{}),
 		preVotes:           make(map[NodeID]struct{}),
 		activePeers:        make(map[NodeID]struct{}),
@@ -515,17 +519,22 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 
 // State returns the Node's current deterministic state.
 func (n *Node) State() State {
+	var lastAppliedTerm uint64
+	if n.lastApplied > 0 {
+		lastAppliedTerm = n.log[n.lastApplied-1].Term
+	}
 	return State{
-		ID:           n.id,
-		Role:         n.role,
-		Term:         n.term,
-		VotedFor:     n.votedFor,
-		LeaderID:     n.leaderID,
-		LastLogIndex: n.lastLogIndex,
-		LastLogTerm:  n.lastLogTerm,
-		CommitIndex:  n.commitIndex,
-		LastApplied:  n.lastApplied,
-		ReadReady:    n.readReady,
+		ID:              n.id,
+		Role:            n.role,
+		Term:            n.term,
+		VotedFor:        n.votedFor,
+		LeaderID:        n.leaderID,
+		LastLogIndex:    n.lastLogIndex,
+		LastLogTerm:     n.lastLogTerm,
+		CommitIndex:     n.commitIndex,
+		LastApplied:     n.lastApplied,
+		LastAppliedTerm: lastAppliedTerm,
+		ReadReady:       n.readReady,
 	}
 }
 

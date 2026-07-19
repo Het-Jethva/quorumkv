@@ -1,6 +1,7 @@
 package node_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -8,17 +9,124 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Het-Jethva/quorumkv/client"
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/node"
 	"go.uber.org/goleak"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 )
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
+}
+
+func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T) {
+	members := make(map[string]config.Member, 3)
+	configs := make(map[string]config.Config, 3)
+	addresses := make([]string, 0, 3)
+	for index := 1; index <= 3; index++ {
+		id := fmt.Sprintf("node-%d", index)
+		members[id] = config.Member{PeerAddress: unusedAddress(t), ClientAddress: unusedAddress(t)}
+	}
+	for index := 1; index <= 3; index++ {
+		id := fmt.Sprintf("node-%d", index)
+		configs[id] = config.Config{
+			Version: 1, ClusterID: "snapshot-restart-test", ActiveSessionLimit: 2,
+			Node: config.Node{ID: id, DataDir: t.TempDir()}, Members: members,
+		}
+		addresses = append(addresses, members[id].ClientAddress)
+	}
+
+	start := func() (context.CancelFunc, map[string]*node.Node, <-chan error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		nodes := make(map[string]*node.Node, 3)
+		results := make(chan error, 3)
+		for id, cfg := range configs {
+			running := node.New(cfg)
+			nodes[id] = running
+			go func() { results <- running.Run(ctx) }()
+		}
+		return cancel, nodes, results
+	}
+	stop := func(cancel context.CancelFunc, results <-chan error) {
+		cancel()
+		for range 3 {
+			if err := <-results; err != nil {
+				t.Fatalf("stop Node: %v", err)
+			}
+		}
+	}
+
+	cancel, nodes, results := start()
+	leader := waitForStableLeader(t, members, nil, processTestDeadline)
+	cluster := client.New(append([]string{members[leader].ClientAddress}, addresses...)...)
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	sessionID, err := cluster.OpenSession(requestCtx)
+	if err != nil {
+		requestCancel()
+		t.Fatalf("open Client Session: %v", err)
+	}
+	if err := cluster.Set(requestCtx, sessionID, 1, "deleted-after-snapshot", []byte("present")); err != nil {
+		requestCancel()
+		t.Fatalf("SET deleted Key: %v", err)
+	}
+	wantValue := []byte{0, 1, 2, 0xff}
+	if err := cluster.Set(requestCtx, sessionID, 2, "retained", wantValue); err != nil {
+		requestCancel()
+		t.Fatalf("SET retained Key: %v", err)
+	}
+	if got, err := cluster.Get(requestCtx, "retained"); err != nil || !bytes.Equal(got, wantValue) {
+		requestCancel()
+		t.Fatalf("GET before Snapshot = %v, %v; want %v", got, err, wantValue)
+	}
+	requestCancel()
+
+	// Each runtime captures only state it has applied. Any committed entries not
+	// yet applied at this barrier remain in the WAL suffix and are replayed.
+	for id, running := range nodes {
+		ctx, cancelSnapshot := context.WithTimeout(context.Background(), 5*time.Second)
+		err := running.CreateSnapshot(ctx)
+		cancelSnapshot()
+		if err != nil {
+			stop(cancel, results)
+			t.Fatalf("create Snapshot on %s: %v", id, err)
+		}
+	}
+
+	requestCtx, requestCancel = context.WithTimeout(context.Background(), 10*time.Second)
+	existed, err := cluster.Delete(requestCtx, sessionID, 3, "deleted-after-snapshot")
+	if err != nil || !existed {
+		requestCancel()
+		t.Fatalf("DELETE after Snapshot = existed %v, error %v; want true", existed, err)
+	}
+	existed, err = cluster.Delete(requestCtx, sessionID, 3, "deleted-after-snapshot")
+	requestCancel()
+	if err != nil || !existed {
+		t.Fatalf("duplicate DELETE before restart = existed %v, error %v; want cached true", existed, err)
+	}
+	stop(cancel, results)
+
+	cancel, _, results = start()
+	defer stop(cancel, results)
+	leader = waitForStableLeader(t, members, nil, processTestDeadline)
+	cluster = client.New(append([]string{members[leader].ClientAddress}, addresses...)...)
+	requestCtx, requestCancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer requestCancel()
+	if got, err := cluster.Get(requestCtx, "retained"); err != nil || !bytes.Equal(got, wantValue) {
+		t.Fatalf("GET after restart = %v, %v; want %v", got, err, wantValue)
+	}
+	if _, err := cluster.Get(requestCtx, "deleted-after-snapshot"); status.Code(err) != codes.NotFound {
+		t.Fatalf("GET deleted Key after restart error = %v, want NotFound", err)
+	}
+	existed, err = cluster.Delete(requestCtx, sessionID, 3, "deleted-after-snapshot")
+	if err != nil || !existed {
+		t.Fatalf("duplicate DELETE after restart = existed %v, error %v; want cached true", existed, err)
+	}
 }
 
 func TestNodeReportsStatusAndHealthThenStops(t *testing.T) {
