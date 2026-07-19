@@ -2,7 +2,6 @@
 package wal
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -363,12 +362,17 @@ func (w *WAL) appendRecord(kind recordType, payload []byte) error {
 
 func recoverSegments(segments []segmentFile) (RecoveredState, error) {
 	var state RecoveredState
-	for _, segment := range segments {
-		file, err := os.Open(segment.path)
+	for index, segment := range segments {
+		finalSegment := index == len(segments)-1
+		flags := os.O_RDONLY
+		if finalSegment {
+			flags = os.O_RDWR
+		}
+		file, err := os.OpenFile(segment.path, flags, 0)
 		if err != nil {
 			return RecoveredState{}, fmt.Errorf("open WAL segment %q: %w", segment.path, err)
 		}
-		err = readSegment(file, segment.path, &state)
+		err = readSegment(file, segment.path, finalSegment, &state)
 		closeErr := file.Close()
 		if err != nil {
 			return RecoveredState{}, err
@@ -383,9 +387,14 @@ func recoverSegments(segments []segmentFile) (RecoveredState, error) {
 	return state, nil
 }
 
-func readSegment(file *os.File, path string, state *RecoveredState) error {
+func readSegment(file *os.File, path string, recoverFinalFrame bool, state *RecoveredState) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat WAL segment %q: %w", path, err)
+	}
+	size := info.Size()
 	header := make([]byte, segmentHeaderSize)
-	if _, err := io.ReadFull(file, header); err != nil {
+	if _, err := file.ReadAt(header, 0); err != nil {
 		return fmt.Errorf("read WAL segment header %q: %w", path, err)
 	}
 	if string(header[:len(segmentMagic)]) != segmentMagic {
@@ -396,35 +405,60 @@ func readSegment(file *os.File, path string, state *RecoveredState) error {
 		return fmt.Errorf("WAL segment %q has unsupported format version %d", path, version)
 	}
 
-	reader := bufio.NewReader(file)
-	for frame := 1; ; frame++ {
-		frameHeader := make([]byte, frameHeaderSize)
-		_, err := io.ReadFull(reader, frameHeader)
-		if errors.Is(err, io.EOF) {
+	for offset := segmentHeaderSize; ; {
+		if offset == size {
 			return nil
 		}
-		if err != nil {
-			return fmt.Errorf("read WAL segment %q frame %d header: %w", path, frame, err)
+		if size-offset < frameHeaderSize {
+			if recoverFinalFrame {
+				return truncateFinalFrame(file, path, offset)
+			}
+			return fmt.Errorf("read WAL segment %q byte offset %d frame header: %w", path, offset, io.ErrUnexpectedEOF)
+		}
+		frameHeader := make([]byte, frameHeaderSize)
+		if _, err := file.ReadAt(frameHeader, offset); err != nil {
+			return fmt.Errorf("read WAL segment %q byte offset %d frame header: %w", path, offset, err)
 		}
 		length := binary.BigEndian.Uint32(frameHeader[0:4])
 		if length == 0 {
-			return fmt.Errorf("WAL segment %q frame %d has zero length", path, frame)
+			return fmt.Errorf("WAL segment %q byte offset %d frame has zero length", path, offset)
 		}
 		if length > maxRecordSize {
-			return fmt.Errorf("WAL segment %q frame %d length %d exceeds limit %d", path, frame, length, maxRecordSize)
+			return fmt.Errorf("WAL segment %q byte offset %d frame length %d exceeds limit %d", path, offset, length, maxRecordSize)
+		}
+		frameEnd := offset + frameHeaderSize + int64(length)
+		if frameEnd > size {
+			if recoverFinalFrame {
+				return truncateFinalFrame(file, path, offset)
+			}
+			return fmt.Errorf("read WAL segment %q byte offset %d frame body: %w", path, offset, io.ErrUnexpectedEOF)
 		}
 		body := make([]byte, length)
-		if _, err := io.ReadFull(reader, body); err != nil {
-			return fmt.Errorf("read WAL segment %q frame %d body: %w", path, frame, err)
+		if _, err := file.ReadAt(body, offset+frameHeaderSize); err != nil {
+			return fmt.Errorf("read WAL segment %q byte offset %d frame body: %w", path, offset, err)
 		}
 		wantChecksum := binary.BigEndian.Uint32(frameHeader[4:8])
 		if got := crc32.ChecksumIEEE(body); got != wantChecksum {
-			return fmt.Errorf("WAL segment %q frame %d checksum mismatch: got %08x, want %08x", path, frame, got, wantChecksum)
+			if recoverFinalFrame && frameEnd == size {
+				return truncateFinalFrame(file, path, offset)
+			}
+			return fmt.Errorf("WAL segment %q byte offset %d frame checksum mismatch: got %08x, want %08x", path, offset, got, wantChecksum)
 		}
 		if err := applyRecord(recordType(body[0]), body[1:], state); err != nil {
-			return fmt.Errorf("decode WAL segment %q frame %d: %w", path, frame, err)
+			return fmt.Errorf("decode WAL segment %q byte offset %d frame: %w", path, offset, err)
 		}
+		offset = frameEnd
 	}
+}
+
+func truncateFinalFrame(file *os.File, path string, offset int64) error {
+	if err := file.Truncate(offset); err != nil {
+		return fmt.Errorf("truncate interrupted final WAL frame in segment %q at byte offset %d: %w", path, offset, err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync truncated WAL segment %q at byte offset %d: %w", path, offset, err)
+	}
+	return nil
 }
 
 func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
