@@ -21,6 +21,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
+        if: runner.os == 'Linux'
         shell: bash
         run: test -z "$(gofmt -l .)"
       - name: Test
