@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	maxAttempts    = 16
+	maxAttempts    = 128
 	initialBackoff = 25 * time.Millisecond
 	maximumBackoff = 200 * time.Millisecond
 )
