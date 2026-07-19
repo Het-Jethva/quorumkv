@@ -49,6 +49,7 @@ type raftInput struct {
 	requestContext context.Context
 	readResult     chan readResult
 	key            string
+	snapshotResult chan error
 }
 
 // New creates a node from an already validated configuration.

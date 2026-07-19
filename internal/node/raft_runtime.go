@@ -6,16 +6,18 @@ import (
 
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
+	"github.com/Het-Jethva/quorumkv/internal/snapshot"
 	"github.com/Het-Jethva/quorumkv/internal/wal"
 )
 
 // raftRuntime owns the synchronous boundary between deterministic election
 // decisions and durable local effects. Its caller owns event serialization.
 type raftRuntime struct {
-	core            *raft.Node
-	wal             *wal.WAL
-	observeMutation mutationObserver
-	leaderMutations map[uint64]raft.LogEntry
+	core              *raft.Node
+	wal               *wal.WAL
+	observeMutation   mutationObserver
+	leaderMutations   map[uint64]raft.LogEntry
+	recoveredSnapshot *snapshot.State
 }
 
 func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, error) {
@@ -34,15 +36,34 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 		}
 		logEntries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: raft.EntryType(entry.Type), SessionID: raft.SessionID(entry.SessionID), Sequence: entry.Sequence, Key: entry.Key, Value: append([]byte(nil), entry.Value...)}
 	}
+	identity := snapshotIdentity(cfg)
+	logTerms := make([]uint64, len(recovered.Log))
+	for index, entry := range recovered.Log {
+		logTerms[index] = entry.Term
+	}
+	recoveredSnapshot, err := snapshot.LoadNewest(cfg.Node.DataDir, snapshot.Compatibility{
+		Identity:    identity,
+		CommitIndex: recovered.CommitIndex,
+		LogTerms:    logTerms,
+	})
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("recover Node %q Snapshot: %w", cfg.Node.ID, err)
+	}
+	var snapshotIndex uint64
+	if recoveredSnapshot != nil {
+		snapshotIndex = recoveredSnapshot.IncludedIndex
+	}
 	core := raft.NewNodeFromRecoveredState(raft.NodeID(cfg.Node.ID), peers, raft.RecoveredState{
 		HardState: raft.HardState{
 			Term:     recovered.HardState.Term,
 			VotedFor: raft.NodeID(recovered.HardState.VotedFor),
 		},
-		Log:         logEntries,
-		CommitIndex: recovered.CommitIndex,
+		Log:           logEntries,
+		CommitIndex:   recovered.CommitIndex,
+		SnapshotIndex: snapshotIndex,
 	})
-	return &raftRuntime{core: core, wal: store}, nil
+	return &raftRuntime{core: core, wal: store, recoveredSnapshot: recoveredSnapshot}, nil
 }
 
 // step executes durability actions synchronously. A completion event is not
