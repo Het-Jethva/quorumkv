@@ -19,6 +19,8 @@ const (
 	sessionUnknown
 	sessionClosed
 	sessionAlreadyExists
+	sessionStaleSequence
+	sessionOutOfOrderSequence
 )
 
 type proposalResult struct {
@@ -40,11 +42,17 @@ const (
 type sessionMachine struct {
 	limit    int
 	active   int
-	sessions map[raft.SessionID]sessionState
+	sessions map[raft.SessionID]sessionRecord
+	values   map[string][]byte
+}
+
+type sessionRecord struct {
+	state        sessionState
+	lastSequence uint64
 }
 
 func newSessionMachine(limit int) *sessionMachine {
-	return &sessionMachine{limit: limit, sessions: make(map[raft.SessionID]sessionState)}
+	return &sessionMachine{limit: limit, sessions: make(map[raft.SessionID]sessionRecord), values: make(map[string][]byte)}
 }
 
 func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
@@ -61,21 +69,44 @@ func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
 			result.failure = sessionLimitReached
 			return result
 		}
-		m.sessions[entry.SessionID] = sessionActive
+		m.sessions[entry.SessionID] = sessionRecord{state: sessionActive}
 		m.active++
 		return result
 	case raft.EntryCloseSession:
-		state, exists := m.sessions[entry.SessionID]
+		record, exists := m.sessions[entry.SessionID]
 		if !exists {
 			result.failure = sessionUnknown
 			return result
 		}
-		if state == sessionPermanentlyClosed {
+		if record.state == sessionPermanentlyClosed {
 			result.failure = sessionClosed
 			return result
 		}
-		m.sessions[entry.SessionID] = sessionPermanentlyClosed
+		record.state = sessionPermanentlyClosed
+		m.sessions[entry.SessionID] = record
 		m.active--
+		return result
+	case raft.EntrySet:
+		record, exists := m.sessions[entry.SessionID]
+		if !exists {
+			result.failure = sessionUnknown
+			return result
+		}
+		if record.state == sessionPermanentlyClosed {
+			result.failure = sessionClosed
+			return result
+		}
+		if entry.Sequence <= record.lastSequence {
+			result.failure = sessionStaleSequence
+			return result
+		}
+		if entry.Sequence != record.lastSequence+1 {
+			result.failure = sessionOutOfOrderSequence
+			return result
+		}
+		m.values[entry.Key] = append([]byte(nil), entry.Value...)
+		record.lastSequence = entry.Sequence
+		m.sessions[entry.SessionID] = record
 		return result
 	default:
 		panic(fmt.Sprintf("apply unsupported Raft entry type %d", entry.Type))
@@ -122,28 +153,11 @@ func (n *Node) rejectIfNotLeader() (proposalResult, bool) {
 
 func (n *Node) proposeSession(ctx context.Context, entryType raft.EntryType, sessionID raft.SessionID) (proposalResult, error) {
 	proposalID := raft.ProposalID(n.nextProposal.Add(1))
-	results := make(chan proposalResult, 1)
-	input := raftInput{
-		event:          raft.ProposeSession{ProposalID: proposalID, Type: entryType, SessionID: sessionID},
-		result:         results,
-		requestContext: ctx,
+	result, err := n.propose(ctx, raft.ProposeSession{ProposalID: proposalID, Type: entryType, SessionID: sessionID})
+	if err != nil {
+		return proposalResult{}, err
 	}
-	select {
-	case n.events <- input:
-	case <-n.runtimeDone:
-		return proposalResult{}, status.Error(codes.Unavailable, "Node is stopping")
-	case <-ctx.Done():
-		return proposalResult{}, status.FromContextError(ctx.Err()).Err()
-	}
-
-	select {
-	case result := <-results:
-		return result, n.proposalError(result)
-	case <-n.runtimeDone:
-		return proposalResult{}, status.Error(codes.Unavailable, "Node stopped before the Client Session command completed")
-	case <-ctx.Done():
-		return proposalResult{}, status.FromContextError(ctx.Err()).Err()
-	}
+	return result, n.proposalError(result)
 }
 
 func (n *Node) proposalError(result proposalResult) error {
@@ -173,6 +187,10 @@ func (n *Node) proposalError(result proposalResult) error {
 		return status.Error(codes.FailedPrecondition, "Client Session is closed and cannot be reused")
 	case sessionAlreadyExists:
 		return status.Error(codes.AlreadyExists, "Client Session identity was already used and cannot be reopened")
+	case sessionStaleSequence:
+		return status.Error(codes.FailedPrecondition, "mutation sequence is stale")
+	case sessionOutOfOrderSequence:
+		return status.Error(codes.FailedPrecondition, "mutation sequence is out of order")
 	default:
 		return status.Error(codes.Internal, "Client Session command returned an unknown result")
 	}

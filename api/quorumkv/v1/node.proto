@@ -11,6 +11,7 @@ service NodeService {
 service ClientService {
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc Set(SetRequest) returns (SetResponse);
 }
 
 service PeerService {
@@ -31,6 +32,15 @@ message CloseSessionRequest {
 }
 
 message CloseSessionResponse {}
+
+message SetRequest {
+  bytes session_id = 1;
+  uint64 sequence = 2;
+  string key = 3;
+  bytes value = 4;
+}
+
+message SetResponse {}
 
 // NotLeader is attached to a FailedPrecondition status when the receiving
 // Node knows where the client should retry directly.
@@ -138,6 +148,9 @@ message RaftLogEntry {
   uint64 term = 2;
   RaftEntryType type = 3;
   bytes session_id = 4;
+  uint64 sequence = 5;
+  string key = 6;
+  bytes value = 7;
 }
 
 enum RaftEntryType {
@@ -145,4 +158,5 @@ enum RaftEntryType {
   RAFT_ENTRY_TYPE_NO_OP = 1;
   RAFT_ENTRY_TYPE_OPEN_SESSION = 2;
   RAFT_ENTRY_TYPE_CLOSE_SESSION = 3;
+  RAFT_ENTRY_TYPE_SET = 4;
 }

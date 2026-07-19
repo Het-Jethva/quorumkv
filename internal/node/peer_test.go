@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestPeerAdapterRoundTripsInternalRaftMessages(t *testing.T) {
 		raft.SendPreVoteResponse{To: "node-2", Response: raft.PreVoteResponse{From: "node-1", Term: 2, CurrentTerm: 1, Granted: true}},
 		raft.SendVoteRequest{To: "node-2", Request: raft.VoteRequest{From: "node-1", Term: 2, LastLogIndex: 3, LastLogTerm: 1}},
 		raft.SendVoteResponse{To: "node-2", Response: raft.VoteResponse{From: "node-1", Term: 2, Granted: true}},
-		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 2, PrevLogIndex: 2, PrevLogTerm: 1, Entries: []raft.LogEntry{{Index: 3, Term: 2, Type: raft.EntryNoOp}}, LeaderCommit: 2}},
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 2, PrevLogIndex: 2, PrevLogTerm: 1, Entries: []raft.LogEntry{{Index: 3, Term: 2, Type: raft.EntrySet, SessionID: raft.SessionID{1}, Sequence: 7, Key: "opaque", Value: []byte{0, 255}}}, LeaderCommit: 2}},
 		raft.SendAppendEntriesResponse{To: "node-2", Response: raft.AppendEntriesResponse{From: "node-1", Term: 2, Success: true, MatchIndex: 3}},
 	}
 	for _, action := range actions {
@@ -66,8 +67,45 @@ func TestPeerAdapterRoundTripsInternalRaftMessages(t *testing.T) {
 		if to != "node-2" || request.FromNodeId != "node-1" || request.ToNodeId != "node-2" {
 			t.Fatalf("encode %T route = %q/%q/%q", action, to, request.FromNodeId, request.ToNodeId)
 		}
-		if _, err := decodeRaftMessage(request); err != nil {
+		decoded, err := decodeRaftMessage(request)
+		if err != nil {
 			t.Fatalf("decode %T: %v", action, err)
 		}
+		if appendAction, ok := action.(raft.SendAppendEntries); ok && !reflect.DeepEqual(decoded, appendAction.Request) {
+			t.Fatalf("decoded AppendEntries = %#v, want %#v", decoded, appendAction.Request)
+		}
+	}
+}
+
+func TestPeerSendReturnsAfterQueueingWithoutWaitingForRuntime(t *testing.T) {
+	n := New(config.Config{
+		ClusterID:          "cluster-1",
+		ActiveSessionLimit: 10,
+		Node:               config.Node{ID: "node-1"},
+		Members: map[string]config.Member{
+			"node-1": {},
+			"node-2": {},
+			"node-3": {},
+		},
+	})
+	request := &quorumkvv1.SendRequest{
+		ProtocolVersion: peerProtocolVersion,
+		ClusterId:       "cluster-1",
+		FromNodeId:      "node-2",
+		ToNodeId:        "node-1",
+		Message: &quorumkvv1.SendRequest_PreVoteRequest{PreVoteRequest: &quorumkvv1.PreVoteRequest{
+			Term: 1,
+		}},
+	}
+	if _, err := n.Send(context.Background(), request); err != nil {
+		t.Fatalf("Send() before runtime dequeue: %v", err)
+	}
+	select {
+	case input := <-n.events:
+		if _, ok := input.event.(raft.PreVoteRequest); !ok {
+			t.Fatalf("queued event = %T, want PreVoteRequest", input.event)
+		}
+	default:
+		t.Fatal("Send() returned without queueing the peer event")
 	}
 }

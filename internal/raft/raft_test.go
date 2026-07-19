@@ -251,3 +251,48 @@ func TestLeaderCommitsDirectlyOnlyAnEntryFromItsCurrentTerm(t *testing.T) {
 		t.Fatalf("current-Term quorum actions = %#v, want %#v", actions, want)
 	}
 }
+
+func TestSetAppliesOnlyAfterDurableQuorumReplication(t *testing.T) {
+	node := raft.NewNode("node-1", []raft.NodeID{"node-2", "node-3"})
+	node.Step(raft.ElectionTimeout{})
+	node.Step(raft.PreVoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1})
+
+	value := []byte{0, 1, 2, 255}
+	actions := node.Step(raft.ProposeSet{
+		ProposalID: 7,
+		SessionID:  raft.SessionID{9},
+		Sequence:   1,
+		Key:        "opaque",
+		Value:      value,
+	})
+	value[0] = 99
+	wantEntry := raft.LogEntry{Index: 2, Term: 1, Type: raft.EntrySet, SessionID: raft.SessionID{9}, Sequence: 1, Key: "opaque", Value: []byte{0, 1, 2, 255}}
+	wantProposal := []raft.Action{
+		raft.ProposalAccepted{ProposalID: 7, Index: 2},
+		raft.PersistLogEntries{PersistenceID: 2, Entries: []raft.LogEntry{wantEntry}},
+	}
+	if !reflect.DeepEqual(actions, wantProposal) {
+		t.Fatalf("SET proposal actions = %#v, want %#v", actions, wantProposal)
+	}
+	if state := node.State(); state.CommitIndex != 1 || state.LastApplied != 1 {
+		t.Fatalf("state before SET persistence = %#v, want applied only through no-op", state)
+	}
+
+	actions = node.Step(raft.LogEntriesPersisted{PersistenceID: 2})
+	for _, action := range actions {
+		if _, ok := action.(raft.ApplyEntry); ok {
+			t.Fatalf("SET applied before Quorum replication: %#v", actions)
+		}
+	}
+	actions = node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 2})
+	if len(actions) == 0 || !reflect.DeepEqual(actions[0], raft.ApplyEntry{Entry: wantEntry}) {
+		t.Fatalf("SET Quorum acknowledgement actions = %#v, want ApplyEntry first", actions)
+	}
+	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 2 {
+		t.Fatalf("state after SET Quorum = %#v, want committed and applied through 2", state)
+	}
+}

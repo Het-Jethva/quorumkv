@@ -32,6 +32,7 @@ const (
 	recordHardState       recordType = 3
 	recordLogEntries      recordType = 4 // Legacy no-op-only entries.
 	recordLogEntriesV2    recordType = 5
+	recordLogEntryV3      recordType = 6
 )
 
 // Identity binds durable state to one Node in one Cluster.
@@ -55,6 +56,9 @@ type LogEntry struct {
 	Term      uint64
 	Type      EntryType
 	SessionID [16]byte
+	Sequence  uint64
+	Key       string
+	Value     []byte
 }
 
 // RecoveredState is the latest valid state reconstructed from all WAL segments.
@@ -74,16 +78,20 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 	if len(entries) == 0 {
 		return errors.New("save log entries: at least one entry is required")
 	}
-	payload := make([]byte, len(entries)*33)
-	for index, entry := range entries {
-		offset := index * 33
-		binary.BigEndian.PutUint64(payload[offset:offset+8], entry.Index)
-		binary.BigEndian.PutUint64(payload[offset+8:offset+16], entry.Term)
-		payload[offset+16] = byte(entry.Type)
-		copy(payload[offset+17:offset+33], entry.SessionID[:])
-	}
-	if err := w.appendRecord(recordLogEntriesV2, payload); err != nil {
-		return fmt.Errorf("append %d log entries: %w", len(entries), err)
+	for _, entry := range entries {
+		payload := make([]byte, 49+len(entry.Key)+len(entry.Value))
+		binary.BigEndian.PutUint64(payload[0:8], entry.Index)
+		binary.BigEndian.PutUint64(payload[8:16], entry.Term)
+		payload[16] = byte(entry.Type)
+		copy(payload[17:33], entry.SessionID[:])
+		binary.BigEndian.PutUint64(payload[33:41], entry.Sequence)
+		binary.BigEndian.PutUint32(payload[41:45], uint32(len(entry.Key)))
+		binary.BigEndian.PutUint32(payload[45:49], uint32(len(entry.Value)))
+		copy(payload[49:49+len(entry.Key)], entry.Key)
+		copy(payload[49+len(entry.Key):], entry.Value)
+		if err := w.appendRecord(recordLogEntryV3, payload); err != nil {
+			return fmt.Errorf("append log entry at index %d: %w", entry.Index, err)
+		}
 	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync %d log entries: %w", len(entries), err)
@@ -410,6 +418,30 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			}
 			state.Log = append(state.Log, entry)
 		}
+	case recordLogEntryV3:
+		if len(payload) < 49 {
+			return fmt.Errorf("log-entry record length %d is shorter than its header", len(payload))
+		}
+		keyLength := binary.BigEndian.Uint32(payload[41:45])
+		valueLength := binary.BigEndian.Uint32(payload[45:49])
+		wantLength := uint64(49) + uint64(keyLength) + uint64(valueLength)
+		if wantLength != uint64(len(payload)) {
+			return fmt.Errorf("log-entry record length %d does not match encoded length %d", len(payload), wantLength)
+		}
+		entry := LogEntry{
+			Index:    binary.BigEndian.Uint64(payload[0:8]),
+			Term:     binary.BigEndian.Uint64(payload[8:16]),
+			Type:     EntryType(payload[16]),
+			Sequence: binary.BigEndian.Uint64(payload[33:41]),
+			Key:      string(payload[49 : 49+keyLength]),
+			Value:    append([]byte(nil), payload[49+keyLength:]...),
+		}
+		copy(entry.SessionID[:], payload[17:33])
+		lastIndex := uint64(len(state.Log))
+		if entry.Index != lastIndex+1 {
+			return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
+		}
+		state.Log = append(state.Log, entry)
 	default:
 		return fmt.Errorf("unknown record type %d", kind)
 	}

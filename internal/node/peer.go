@@ -43,19 +43,15 @@ func (n *Node) Send(ctx context.Context, request *quorumkvv1.SendRequest) (*quor
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	input := raftInput{event: event, accepted: make(chan struct{})}
+	// A successful peer RPC means the bounded owner queue accepted the message.
+	// Waiting for the owner to dequeue it can deadlock Nodes that synchronously
+	// exchange reciprocal Raft messages; network loss at shutdown is permitted.
+	input := raftInput{event: event}
 	select {
 	case n.events <- input:
-	case <-n.runtimeDone:
-		return nil, status.Error(codes.Unavailable, "target Node is stopping")
-	case <-ctx.Done():
-		return nil, status.FromContextError(ctx.Err()).Err()
-	}
-	select {
-	case <-input.accepted:
 		return &quorumkvv1.SendResponse{}, nil
 	case <-n.runtimeDone:
-		return nil, status.Error(codes.Unavailable, "target Node stopped before accepting the Raft message")
+		return nil, status.Error(codes.Unavailable, "target Node is stopping")
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
@@ -206,7 +202,7 @@ func encodeRaftAction(cfg config.Config, action raft.Action) (raft.NodeID, *quor
 		to = action.To
 		entries := make([]*quorumkvv1.RaftLogEntry, len(action.Request.Entries))
 		for index, entry := range action.Request.Entries {
-			entries[index] = &quorumkvv1.RaftLogEntry{Index: entry.Index, Term: entry.Term, Type: encodeEntryType(entry.Type), SessionId: entry.SessionID[:]}
+			entries[index] = &quorumkvv1.RaftLogEntry{Index: entry.Index, Term: entry.Term, Type: encodeEntryType(entry.Type), SessionId: entry.SessionID[:], Sequence: entry.Sequence, Key: entry.Key, Value: entry.Value}
 		}
 		request.Message = &quorumkvv1.SendRequest_AppendEntriesRequest{AppendEntriesRequest: &quorumkvv1.AppendEntriesRequest{Term: action.Request.Term, PreviousLogIndex: action.Request.PrevLogIndex, PreviousLogTerm: action.Request.PrevLogTerm, Entries: entries, LeaderCommit: action.Request.LeaderCommit}}
 	case raft.SendAppendEntriesResponse:
@@ -245,7 +241,7 @@ func decodeRaftMessage(request *quorumkvv1.SendRequest) (raft.Event, error) {
 			}
 			var sessionID raft.SessionID
 			copy(sessionID[:], entry.SessionId)
-			entries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: entryType, SessionID: sessionID}
+			entries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: entryType, SessionID: sessionID, Sequence: entry.Sequence, Key: entry.Key, Value: append([]byte(nil), entry.Value...)}
 		}
 		return raft.AppendEntries{From: from, Term: message.AppendEntriesRequest.Term, PrevLogIndex: message.AppendEntriesRequest.PreviousLogIndex, PrevLogTerm: message.AppendEntriesRequest.PreviousLogTerm, Entries: entries, LeaderCommit: message.AppendEntriesRequest.LeaderCommit}, nil
 	case *quorumkvv1.SendRequest_AppendEntriesResponse:
@@ -263,6 +259,8 @@ func encodeEntryType(entryType raft.EntryType) quorumkvv1.RaftEntryType {
 		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_OPEN_SESSION
 	case raft.EntryCloseSession:
 		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_CLOSE_SESSION
+	case raft.EntrySet:
+		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_SET
 	}
 	return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_UNSPECIFIED
 }
@@ -275,6 +273,8 @@ func decodeEntryType(entryType quorumkvv1.RaftEntryType) (raft.EntryType, error)
 		return raft.EntryOpenSession, nil
 	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_CLOSE_SESSION:
 		return raft.EntryCloseSession, nil
+	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_SET:
+		return raft.EntrySet, nil
 	default:
 		return 0, fmt.Errorf("raft entry type %s is unsupported", entryType)
 	}

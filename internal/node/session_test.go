@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
@@ -66,4 +68,61 @@ func TestFollowerReturnsTypedLeaderHint(t *testing.T) {
 		}
 	}
 	t.Fatal("OpenSession() error has no typed NotLeader detail")
+}
+
+func TestSessionMachineStoresCopiedOpaqueAndEmptyValuesInSequence(t *testing.T) {
+	machine := newSessionMachine(1)
+	sessionID := raft.SessionID{1}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntryOpenSession, SessionID: sessionID}); result.failure != sessionSucceeded {
+		t.Fatalf("open Client Session = %v, want success", result.failure)
+	}
+
+	source := []byte{0, 1, 255}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 1, Key: "opaque", Value: source}); result.failure != sessionSucceeded {
+		t.Fatalf("apply opaque SET = %v, want success", result.failure)
+	}
+	source[0] = 9
+	if got := machine.values["opaque"]; !reflect.DeepEqual(got, []byte{0, 1, 255}) {
+		t.Fatalf("stored opaque Value = %v, want copied bytes", got)
+	}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 2, Key: "empty", Value: []byte{}}); result.failure != sessionSucceeded {
+		t.Fatalf("apply empty SET = %v, want success", result.failure)
+	}
+	if value, exists := machine.values["empty"]; !exists || len(value) != 0 {
+		t.Fatalf("stored empty Value = %v, exists=%v; want present empty Value", value, exists)
+	}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 2, Key: "stale"}); result.failure != sessionStaleSequence {
+		t.Fatalf("apply stale SET = %v, want stale sequence", result.failure)
+	}
+	if result := machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 4, Key: "gap"}); result.failure != sessionOutOfOrderSequence {
+		t.Fatalf("apply skipped SET = %v, want out-of-order sequence", result.failure)
+	}
+}
+
+func TestSetRejectsInvalidInputBeforeProposal(t *testing.T) {
+	n := New(config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1"}})
+	valid := func() *quorumkvv1.SetRequest {
+		return &quorumkvv1.SetRequest{SessionId: make([]byte, 16), Sequence: 1, Key: "key"}
+	}
+	tests := []struct {
+		name   string
+		change func(*quorumkvv1.SetRequest)
+	}{
+		{name: "session identity", change: func(request *quorumkvv1.SetRequest) { request.SessionId = nil }},
+		{name: "zero sequence", change: func(request *quorumkvv1.SetRequest) { request.Sequence = 0 }},
+		{name: "empty Key", change: func(request *quorumkvv1.SetRequest) { request.Key = "" }},
+		{name: "invalid UTF-8 Key", change: func(request *quorumkvv1.SetRequest) { request.Key = string([]byte{0xff}) }},
+		{name: "oversized Key", change: func(request *quorumkvv1.SetRequest) { request.Key = strings.Repeat("k", maxKeyBytes+1) }},
+		{name: "oversized Value", change: func(request *quorumkvv1.SetRequest) { request.Value = make([]byte, maxValueBytes+1) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid()
+			test.change(request)
+			_, err := n.Set(context.Background(), request)
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("Set() error = %v, want InvalidArgument", err)
+			}
+		})
+	}
 }
