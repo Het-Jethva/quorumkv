@@ -96,6 +96,7 @@ type Cluster struct {
 	electionTimeouts  map[raft.NodeID]time.Duration
 	heartbeatTimeouts map[raft.NodeID]time.Duration
 	quorumTimeouts    map[raft.NodeID]time.Duration
+	applied           map[raft.NodeID][]raft.LogEntry
 	scheduledElection []ScheduledElection
 	trace             []Step
 }
@@ -122,6 +123,7 @@ func NewCluster(timing Timing, clock ElectionClock) (*Cluster, error) {
 		electionTimeouts:  make(map[raft.NodeID]time.Duration, len(threeNodeIDs)),
 		heartbeatTimeouts: make(map[raft.NodeID]time.Duration, len(threeNodeIDs)),
 		quorumTimeouts:    make(map[raft.NodeID]time.Duration, len(threeNodeIDs)),
+		applied:           make(map[raft.NodeID][]raft.LogEntry, len(threeNodeIDs)),
 	}
 	for _, id := range threeNodeIDs {
 		var peers []raft.NodeID
@@ -208,6 +210,11 @@ func (c *Cluster) CheckQuorumTimeout(id raft.NodeID) time.Duration {
 	return c.quorumTimeouts[id]
 }
 
+// AppliedEntries returns the entries the runtime applied for one Node.
+func (c *Cluster) AppliedEntries(id raft.NodeID) []raft.LogEntry {
+	return append([]raft.LogEntry(nil), c.applied[id]...)
+}
+
 func (c *Cluster) process(initial scheduledEvent) error {
 	queue := []scheduledEvent{initial}
 	for len(queue) > 0 {
@@ -219,14 +226,12 @@ func (c *Cluster) process(initial scheduledEvent) error {
 		}
 		actions := node.Step(next.event)
 		c.trace = append(c.trace, Step{Node: next.node, Event: next.event, Actions: actions})
-		if err := assertAtMostOneLeaderPerTerm(c.nodes); err != nil {
-			return err
-		}
-
 		for _, action := range actions {
 			switch action := action.(type) {
 			case raft.PersistHardState:
 				queue = append(queue, scheduledEvent{node: next.node, event: raft.HardStatePersisted{PersistenceID: action.PersistenceID}})
+			case raft.PersistLogEntries:
+				queue = append(queue, scheduledEvent{node: next.node, event: raft.LogEntriesPersisted{PersistenceID: action.PersistenceID}})
 			case raft.SendPreVoteRequest:
 				c.deliver(&queue, next.node, action.To, action.Request)
 			case raft.SendPreVoteResponse:
@@ -235,9 +240,9 @@ func (c *Cluster) process(initial scheduledEvent) error {
 				c.deliver(&queue, next.node, action.To, action.Request)
 			case raft.SendVoteResponse:
 				c.deliver(&queue, next.node, action.To, action.Response)
-			case raft.SendHeartbeat:
-				c.deliver(&queue, next.node, action.To, action.Heartbeat)
-			case raft.SendHeartbeatResponse:
+			case raft.SendAppendEntries:
+				c.deliver(&queue, next.node, action.To, action.Request)
+			case raft.SendAppendEntriesResponse:
 				c.deliver(&queue, next.node, action.To, action.Response)
 			case raft.ResetElectionTimer:
 				c.resetElectionTimer(next.node)
@@ -245,10 +250,20 @@ func (c *Cluster) process(initial scheduledEvent) error {
 				c.heartbeatTimeouts[next.node] = c.timing.HeartbeatInterval
 			case raft.ResetCheckQuorumTimer:
 				c.quorumTimeouts[next.node] = c.timing.CheckQuorumWindow
-			case raft.BecameLeader, raft.LostLeadership:
+			case raft.ApplyEntry:
+				applied := c.applied[next.node]
+				wantIndex := uint64(len(applied) + 1)
+				if action.Entry.Index != wantIndex {
+					return fmt.Errorf("node %q applied index %d after %d entries", next.node, action.Entry.Index, len(applied))
+				}
+				c.applied[next.node] = append(applied, action.Entry)
+			case raft.BecameLeader, raft.LostLeadership, raft.BecameReadReady:
 				// The harness fires these controlled timers explicitly; role changes
 				// are already visible through Node.State.
 			}
+		}
+		if err := assertRaftInvariants(c.nodes, c.applied); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -292,10 +307,19 @@ func RunElection(seed int64) (ElectionResult, error) {
 	panic("unreachable")
 }
 
-func assertAtMostOneLeaderPerTerm(nodes map[raft.NodeID]*raft.Node) error {
+func assertRaftInvariants(nodes map[raft.NodeID]*raft.Node, applied map[raft.NodeID][]raft.LogEntry) error {
 	for term, leaders := range leadersByTerm(nodes) {
 		if len(leaders) > 1 {
 			return fmt.Errorf("term %d has multiple Leaders: %v", term, leaders)
+		}
+	}
+	for id, node := range nodes {
+		state := node.State()
+		if state.LastApplied > state.CommitIndex {
+			return fmt.Errorf("node %q applied through %d beyond commit index %d", id, state.LastApplied, state.CommitIndex)
+		}
+		if uint64(len(applied[id])) != state.LastApplied {
+			return fmt.Errorf("node %q recorded %d applied entries, state reports %d", id, len(applied[id]), state.LastApplied)
 		}
 	}
 	return nil

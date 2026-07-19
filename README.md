@@ -1,6 +1,6 @@
 # QuorumKV
 
-QuorumKV is an in-progress three-node distributed key-value database built in Go. It can boot one observable Node and includes a deterministic event-to-action Raft core that proves a seeded three-Node Leader election without networking, disk I/O, or clocks inside the core.
+QuorumKV is an in-progress three-node distributed key-value database built in Go. It can boot one observable Node and includes a deterministic event-to-action Raft core that elects a Leader and establishes read readiness by durably replicating, committing, and applying a current-Term no-op without networking, disk I/O, or clocks inside the core.
 
 ## Run one Node
 
