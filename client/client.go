@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
@@ -21,11 +22,14 @@ const (
 
 // Client starts at one configured Node and follows typed Leader hints directly.
 type Client struct {
-	address string
+	addresses []string
 }
 
-// New creates a Client whose first request is sent to address.
-func New(address string) *Client { return &Client{address: address} }
+// New creates a Client that starts at the first address and falls back across
+// the remaining configured Node addresses.
+func New(addresses ...string) *Client {
+	return &Client{addresses: append([]string(nil), addresses...)}
+}
 
 // OpenSession creates a replicated Client Session and returns its 128-bit identity.
 func (c *Client) OpenSession(ctx context.Context) ([16]byte, error) {
@@ -65,8 +69,26 @@ func (c *Client) Set(ctx context.Context, sessionID [16]byte, sequence uint64, k
 	})
 }
 
+// Get returns the latest linearizable Value stored under key.
+func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	var value []byte
+	err := c.withLeader(ctx, func(client quorumkvv1.ClientServiceClient) error {
+		response, err := client.Get(ctx, &quorumkvv1.GetRequest{Key: key})
+		if err != nil {
+			return err
+		}
+		value = append([]byte(nil), response.Value...)
+		return nil
+	})
+	return value, err
+}
+
 func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServiceClient) error) error {
-	address := c.address
+	if len(c.addresses) == 0 {
+		return fmt.Errorf("at least one Node address is required")
+	}
+	configuredIndex := 0
+	address := c.addresses[configuredIndex]
 	backoff := initialBackoff
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -89,7 +111,10 @@ func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServ
 		if status.Code(err) != codes.Unavailable {
 			return err
 		}
-		timer := time.NewTimer(backoff)
+		configuredIndex = (configuredIndex + 1) % len(c.addresses)
+		address = c.addresses[configuredIndex]
+		jitter := time.Duration(rand.Int64N(int64(backoff)/2 + 1))
+		timer := time.NewTimer(backoff/2 + jitter)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

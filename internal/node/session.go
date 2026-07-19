@@ -135,6 +135,11 @@ func (m *sessionMachine) evaluateSet(sessionID raft.SessionID, sequence uint64) 
 	return result, true
 }
 
+func (m *sessionMachine) get(key string) ([]byte, bool) {
+	value, exists := m.values[key]
+	return append([]byte(nil), value...), exists
+}
+
 func (n *Node) OpenSession(ctx context.Context, _ *quorumkvv1.OpenSessionRequest) (*quorumkvv1.OpenSessionResponse, error) {
 	if result, rejected := n.rejectIfNotLeader(); rejected {
 		return nil, n.proposalError(result)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -245,6 +246,19 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	} else if !strings.Contains(output, `"stored":true`) {
 		t.Fatalf("SET CLI output = %q, want stored success", output)
 	}
+	getOutput, err := runCLIGet(initialFollower.ClientAddress, "opaque", 5*time.Second)
+	if err != nil {
+		t.Fatalf("GET through Follower after completed SET: %v\n%s", err, getOutput)
+	}
+	var getResult struct {
+		Value []byte `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(getOutput), &getResult); err != nil {
+		t.Fatalf("decode GET output %q: %v", getOutput, err)
+	}
+	if !bytes.Equal(getResult.Value, []byte{1, 2, 3}) {
+		t.Fatalf("GET Value = %v, want latest completed SET Value %v", getResult.Value, []byte{1, 2, 3})
+	}
 
 	for _, process := range processes {
 		process.stop()
@@ -291,6 +305,12 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	if err == nil || strings.Contains(output, `"stored":true`) {
 		t.Fatalf("SET without Quorum output = %q, error = %v; want timeout or Unavailable without success", output, err)
 	}
+	requestCtx, cancel = context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	_, err = client.New(members[replacement].ClientAddress).Get(requestCtx, "opaque")
+	cancel()
+	if err == nil {
+		t.Fatal("GET from minority partition succeeded, want unavailable or deadline failure")
+	}
 
 	for id, process := range processes {
 		select {
@@ -317,6 +337,12 @@ func runCLISet(address string, sessionID [16]byte, sequence uint64, key, value s
 		"--timeout", timeout.String(),
 		"set", hex.EncodeToString(sessionID[:]), strconv.FormatUint(sequence, 10), key, value,
 	}, &output)
+	return output.String(), err
+}
+
+func runCLIGet(address, key string, timeout time.Duration) (string, error) {
+	var output bytes.Buffer
+	err := cli.Run([]string{"--address", address, "--timeout", timeout.String(), "get", key}, &output)
 	return output.String(), err
 }
 

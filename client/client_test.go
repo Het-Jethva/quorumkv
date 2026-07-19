@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"sync/atomic"
@@ -12,6 +13,28 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestGetFallsBackAcrossConfiguredNodes(t *testing.T) {
+	unavailable, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve unavailable address: %v", err)
+	}
+	unavailableAddress := unavailable.Addr().String()
+	unavailable.Close()
+
+	server := &getServer{value: []byte{0, 1, 255}}
+	availableAddress, stop := serveClient(t, server)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	value, err := New(unavailableAddress, availableAddress).Get(ctx, "opaque")
+	if err != nil {
+		t.Fatalf("Get() through fallback Node: %v", err)
+	}
+	if !bytes.Equal(value, server.value) {
+		t.Fatalf("Get() Value = %v, want %v", value, server.value)
+	}
+}
 
 func TestSetDoesNotRetrySequenceErrors(t *testing.T) {
 	tests := []struct {
@@ -59,6 +82,15 @@ type sequenceErrorServer struct {
 	quorumkvv1.UnimplementedClientServiceServer
 	err      error
 	attempts atomic.Int32
+}
+
+type getServer struct {
+	quorumkvv1.UnimplementedClientServiceServer
+	value []byte
+}
+
+func (s *getServer) Get(context.Context, *quorumkvv1.GetRequest) (*quorumkvv1.GetResponse, error) {
+	return &quorumkvv1.GetResponse{Value: append([]byte(nil), s.value...)}, nil
 }
 
 func (s *sequenceErrorServer) Set(context.Context, *quorumkvv1.SetRequest) (*quorumkvv1.SetResponse, error) {

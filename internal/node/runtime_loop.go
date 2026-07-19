@@ -51,8 +51,14 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		sequence uint64
 		index    uint64
 	}
+	type pendingRead struct {
+		result chan readResult
+		ctx    context.Context
+		key    string
+	}
 	pending := make(map[uint64][]pendingProposal)
 	inFlightMutations := make(map[raft.SessionID]inFlightMutation)
+	pendingReads := make(map[raft.ReadID]pendingRead)
 	for {
 		for index, proposals := range pending {
 			active := proposals[:0]
@@ -67,9 +73,16 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				pending[index] = active
 			}
 		}
+		for readID, read := range pendingReads {
+			if read.ctx.Err() != nil {
+				delete(pendingReads, readID)
+			}
+		}
 		var event raft.Event
 		var proposalResults chan proposalResult
 		var proposalContext context.Context
+		var readResults chan readResult
+		var readKey string
 		select {
 		case <-ctx.Done():
 			return nil
@@ -77,12 +90,17 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			event = input.event
 			proposalResults = input.result
 			proposalContext = input.requestContext
+			readResults = input.readResult
+			readKey = input.key
 		case <-electionTimer.C:
 			event = raft.ElectionTimeout{}
 		case <-heartbeatC:
 			event = raft.HeartbeatTimeout{}
 		case <-quorumC:
 			event = raft.CheckQuorumTimeout{}
+		}
+		if read, ok := event.(raft.ConfirmRead); ok && readResults != nil {
+			pendingReads[read.ReadID] = pendingRead{result: readResults, ctx: proposalContext, key: readKey}
 		}
 
 		if set, ok := event.(raft.ProposeSet); ok {
@@ -140,6 +158,21 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				}
 			case raft.BecameLeader, raft.BecameReadReady, raft.LostLeadership:
 				// Role and progress are read from the core after all actions finish.
+			case raft.ReadConfirmed:
+				read, ok := pendingReads[action.ReadID]
+				if !ok {
+					continue
+				}
+				value, found := sessions.get(read.key)
+				read.result <- readResult{value: value, found: found}
+				delete(pendingReads, action.ReadID)
+			case raft.ReadRejected:
+				read, ok := pendingReads[action.ReadID]
+				if !ok {
+					continue
+				}
+				read.result <- readResult{leaderID: action.LeaderID, rejected: true}
+				delete(pendingReads, action.ReadID)
 			}
 		}
 
@@ -152,6 +185,10 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				delete(pending, index)
 			}
 			clear(inFlightMutations)
+			for readID, read := range pendingReads {
+				read.result <- readResult{leaderID: state.LeaderID, rejected: true}
+				delete(pendingReads, readID)
+			}
 		}
 		if state.Role != raft.Leader {
 			stopTimer(heartbeatTimer)

@@ -38,6 +38,9 @@ func Run(args []string, output io.Writer) error {
 	if flags.Arg(0) == "set" {
 		return runSet(ctx, output, *address, flags.Args()[1:])
 	}
+	if flags.Arg(0) == "get" {
+		return runGet(ctx, output, *address, flags.Args()[1:])
+	}
 	if flags.NArg() != 1 || flags.Arg(0) != "status" {
 		return usageError()
 	}
@@ -65,6 +68,20 @@ func Run(args []string, output io.Writer) error {
 		return fmt.Errorf("write status: %w", err)
 	}
 	return nil
+}
+
+func runGet(ctx context.Context, output io.Writer, address string, args []string) error {
+	if len(args) != 1 {
+		return usageError()
+	}
+	value, err := client.New(address).Get(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("GET Key %q: %w", args[0], err)
+	}
+	return json.NewEncoder(output).Encode(struct {
+		Key   string `json:"key"`
+		Value []byte `json:"value"`
+	}{Key: args[0], Value: value})
 }
 
 func runSet(ctx context.Context, output io.Writer, address string, args []string) error {
@@ -126,5 +143,5 @@ func parseSessionID(encoded string) ([16]byte, error) {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: quorumkvctl [flags] status | session open | session close <session-id> | set <session-id> <sequence> <key> <value>")
+	return fmt.Errorf("usage: quorumkvctl [flags] status | session open | session close <session-id> | set <session-id> <sequence> <key> <value> | get <key>")
 }
