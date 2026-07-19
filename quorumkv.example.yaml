@@ -1,5 +1,6 @@
 version: 1
 cluster_id: local-demo
+active_session_limit: 1024
 node:
   id: node-1
   data_dir: .data/node-1

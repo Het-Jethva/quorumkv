@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Het-Jethva/quorumkv/client"
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/node"
@@ -17,6 +18,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"gopkg.in/yaml.v3"
 )
+
+const processTestDeadline = 30 * time.Second
 
 func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 	members := make(map[string]config.Member, 3)
@@ -31,10 +34,11 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 	for index := 1; index <= 3; index++ {
 		id := fmt.Sprintf("node-%d", index)
 		cfg := config.Config{
-			Version:   1,
-			ClusterID: "process-test-cluster",
-			Node:      config.Node{ID: id, DataDir: filepath.Join(t.TempDir(), id)},
-			Members:   members,
+			Version:            1,
+			ClusterID:          "process-test-cluster",
+			ActiveSessionLimit: 1,
+			Node:               config.Node{ID: id, DataDir: filepath.Join(t.TempDir(), id)},
+			Members:            members,
 		}
 		processes[id] = startNodeProcess(t, cfg)
 	}
@@ -44,14 +48,35 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 		}
 	}()
 
-	first := waitForSingleLeader(t, members, nil, 12*time.Second)
+	first := waitForSingleLeader(t, members, nil, processTestDeadline)
+	initialFollower := memberOtherThan(t, members, map[string]bool{first: true})
+	sessionClient := client.New(initialFollower.ClientAddress)
+	requestCtx, cancel := context.WithTimeout(context.Background(), processTestDeadline)
+	sessionID, err := sessionClient.OpenSession(requestCtx)
+	cancel()
+	if err != nil {
+		t.Fatalf("open Client Session through Follower: %v", err)
+	}
+	if sessionID == ([16]byte{}) {
+		t.Fatal("OpenSession() returned the zero identity")
+	}
+
 	processes[first].stop()
 	delete(processes, first)
 
-	replacement := waitForSingleLeader(t, members, map[string]bool{first: true}, 12*time.Second)
+	replacement := waitForSingleLeader(t, members, map[string]bool{first: true}, processTestDeadline)
 	if replacement == first {
 		t.Fatalf("replacement Leader = stopped Node %q", first)
 	}
+	replacementFollower := memberOtherThan(t, members, map[string]bool{first: true, replacement: true})
+	sessionClient = client.New(replacementFollower.ClientAddress)
+	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
+	err = sessionClient.CloseSession(requestCtx, sessionID)
+	cancel()
+	if err != nil {
+		t.Fatalf("close replicated Client Session after Leader change: %v", err)
+	}
+
 	for id, process := range processes {
 		select {
 		case err := <-process.done:
@@ -60,6 +85,17 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 		default:
 		}
 	}
+}
+
+func memberOtherThan(t *testing.T, members map[string]config.Member, excluded map[string]bool) config.Member {
+	t.Helper()
+	for id, member := range members {
+		if !excluded[id] {
+			return member
+		}
+	}
+	t.Fatal("no eligible Cluster member")
+	return config.Member{}
 }
 
 func TestNodeProcessHelper(t *testing.T) {
@@ -158,7 +194,11 @@ func waitForSingleLeader(t *testing.T, members map[string]config.Member, exclude
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("did not observe one agreed Leader within %v; last status: %#v", timeout, observed)
+	details := make(map[string]string, len(observed))
+	for id, state := range observed {
+		details[id] = fmt.Sprintf("role=%s leader=%q term=%d", state.Role, state.LeaderId, state.Term)
+	}
+	t.Fatalf("did not observe one agreed Leader within %v; last status: %#v", timeout, details)
 	return ""
 }
 

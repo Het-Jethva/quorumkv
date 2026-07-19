@@ -25,8 +25,9 @@ func TestNodeReportsStatusAndHealthThenStops(t *testing.T) {
 	peerAddress := unusedAddress(t)
 	clientAddress := unusedAddress(t)
 	cfg := config.Config{
-		Version:   1,
-		ClusterID: "test-cluster",
+		Version:            1,
+		ClusterID:          "test-cluster",
+		ActiveSessionLimit: 10,
 		Node: config.Node{
 			ID:      "node-1",
 			DataDir: t.TempDir(),
@@ -91,8 +92,9 @@ func TestNodeReportsStatusAndHealthThenStops(t *testing.T) {
 func TestNodeStartupRejectsConflictingDurableIdentity(t *testing.T) {
 	directory := t.TempDir()
 	base := config.Config{
-		Version:   1,
-		ClusterID: "cluster-1",
+		Version:            1,
+		ClusterID:          "cluster-1",
+		ActiveSessionLimit: 10,
 		Node: config.Node{
 			ID:      "node-1",
 			DataDir: directory,
@@ -125,10 +127,11 @@ func TestNodeStopsOnPeerClusterMismatchWithDiagnostic(t *testing.T) {
 	for index, clusterID := range []string{"cluster-1", "cluster-2"} {
 		id := fmt.Sprintf("node-%d", index+1)
 		cfg := config.Config{
-			Version:   1,
-			ClusterID: clusterID,
-			Node:      config.Node{ID: id, DataDir: t.TempDir()},
-			Members:   members,
+			Version:            1,
+			ClusterID:          clusterID,
+			ActiveSessionLimit: 10,
+			Node:               config.Node{ID: id, DataDir: t.TempDir()},
+			Members:            members,
 		}
 		go func() { results <- node.New(cfg).Run(ctx) }()
 	}

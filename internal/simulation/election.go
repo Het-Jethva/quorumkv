@@ -168,6 +168,11 @@ func (c *Cluster) FireCheckQuorumTimeout(id raft.NodeID) error {
 	return c.process(scheduledEvent{node: id, event: raft.CheckQuorumTimeout{}})
 }
 
+// ProposeSession injects one deterministic Client Session command.
+func (c *Cluster) ProposeSession(id raft.NodeID, proposal raft.ProposeSession) error {
+	return c.process(scheduledEvent{node: id, event: proposal})
+}
+
 // Partition permits delivery only between Nodes in the same supplied group.
 func (c *Cluster) Partition(groups ...[]raft.NodeID) {
 	for from := range c.connected {
@@ -257,7 +262,8 @@ func (c *Cluster) process(initial scheduledEvent) error {
 					return fmt.Errorf("node %q applied index %d after %d entries", next.node, action.Entry.Index, len(applied))
 				}
 				c.applied[next.node] = append(applied, action.Entry)
-			case raft.BecameLeader, raft.LostLeadership, raft.BecameReadReady:
+			case raft.BecameLeader, raft.LostLeadership, raft.BecameReadReady,
+				raft.ProposalAccepted, raft.ProposalRejected:
 				// The harness fires these controlled timers explicitly; role changes
 				// are already visible through Node.State.
 			}

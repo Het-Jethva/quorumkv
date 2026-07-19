@@ -8,12 +8,36 @@ service NodeService {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
+service ClientService {
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
 service PeerService {
   rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
   rpc Send(SendRequest) returns (SendResponse);
 }
 
 message GetStatusRequest {}
+
+message OpenSessionRequest {}
+
+message OpenSessionResponse {
+  bytes session_id = 1;
+}
+
+message CloseSessionRequest {
+  bytes session_id = 1;
+}
+
+message CloseSessionResponse {}
+
+// NotLeader is attached to a FailedPrecondition status when the receiving
+// Node knows where the client should retry directly.
+message NotLeader {
+  string leader_id = 1;
+  string leader_address = 2;
+}
 
 message GetStatusResponse {
   string cluster_id = 1;
@@ -45,12 +69,14 @@ message HandshakeRequest {
   string cluster_id = 2;
   string node_id = 3;
   string target_node_id = 4;
+  uint32 active_session_limit = 5;
 }
 
 message HandshakeResponse {
   uint32 protocol_version = 1;
   string cluster_id = 2;
   string node_id = 3;
+  uint32 active_session_limit = 4;
 }
 
 message SendRequest {
@@ -111,9 +137,12 @@ message RaftLogEntry {
   uint64 index = 1;
   uint64 term = 2;
   RaftEntryType type = 3;
+  bytes session_id = 4;
 }
 
 enum RaftEntryType {
   RAFT_ENTRY_TYPE_UNSPECIFIED = 0;
   RAFT_ENTRY_TYPE_NO_OP = 1;
+  RAFT_ENTRY_TYPE_OPEN_SESSION = 2;
+  RAFT_ENTRY_TYPE_CLOSE_SESSION = 3;
 }

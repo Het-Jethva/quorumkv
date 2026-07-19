@@ -24,10 +24,14 @@ func (n *Node) Handshake(_ context.Context, request *quorumkvv1.HandshakeRequest
 	if err := n.validatePeer(request.ProtocolVersion, request.ClusterId, request.NodeId, request.TargetNodeId); err != nil {
 		return nil, err
 	}
+	if request.ActiveSessionLimit != uint32(n.config.ActiveSessionLimit) {
+		return nil, status.Errorf(codes.FailedPrecondition, "peer active Client Session limit %d does not match Node %q limit %d", request.ActiveSessionLimit, n.config.Node.ID, n.config.ActiveSessionLimit)
+	}
 	return &quorumkvv1.HandshakeResponse{
-		ProtocolVersion: peerProtocolVersion,
-		ClusterId:       n.config.ClusterID,
-		NodeId:          n.config.Node.ID,
+		ProtocolVersion:    peerProtocolVersion,
+		ClusterId:          n.config.ClusterID,
+		NodeId:             n.config.Node.ID,
+		ActiveSessionLimit: uint32(n.config.ActiveSessionLimit),
 	}, nil
 }
 
@@ -138,10 +142,11 @@ func (t *peerTransport) client(ctx context.Context, id raft.NodeID) (*peerClient
 	requestCtx, cancel := context.WithTimeout(ctx, peerRPCTimeout)
 	defer cancel()
 	response, err := client.Handshake(requestCtx, &quorumkvv1.HandshakeRequest{
-		ProtocolVersion: peerProtocolVersion,
-		ClusterId:       t.config.ClusterID,
-		NodeId:          t.config.Node.ID,
-		TargetNodeId:    string(id),
+		ProtocolVersion:    peerProtocolVersion,
+		ClusterId:          t.config.ClusterID,
+		NodeId:             t.config.Node.ID,
+		TargetNodeId:       string(id),
+		ActiveSessionLimit: uint32(t.config.ActiveSessionLimit),
 	})
 	if err != nil {
 		connection.Close()
@@ -151,9 +156,9 @@ func (t *peerTransport) client(ctx context.Context, id raft.NodeID) (*peerClient
 		}
 		return nil, handshakeErr
 	}
-	if response.ProtocolVersion != peerProtocolVersion || response.ClusterId != t.config.ClusterID || response.NodeId != string(id) {
+	if response.ProtocolVersion != peerProtocolVersion || response.ClusterId != t.config.ClusterID || response.NodeId != string(id) || response.ActiveSessionLimit != uint32(t.config.ActiveSessionLimit) {
 		connection.Close()
-		return nil, peerConfigurationError{err: fmt.Errorf("handshake with Node %q returned protocol %d Cluster %q Node %q", id, response.ProtocolVersion, response.ClusterId, response.NodeId)}
+		return nil, peerConfigurationError{err: fmt.Errorf("handshake with Node %q returned protocol %d Cluster %q Node %q active Client Session limit %d", id, response.ProtocolVersion, response.ClusterId, response.NodeId, response.ActiveSessionLimit)}
 	}
 	peer := &peerClient{connection: connection, client: client}
 	t.clients[id] = peer
@@ -201,7 +206,7 @@ func encodeRaftAction(cfg config.Config, action raft.Action) (raft.NodeID, *quor
 		to = action.To
 		entries := make([]*quorumkvv1.RaftLogEntry, len(action.Request.Entries))
 		for index, entry := range action.Request.Entries {
-			entries[index] = &quorumkvv1.RaftLogEntry{Index: entry.Index, Term: entry.Term, Type: encodeEntryType(entry.Type)}
+			entries[index] = &quorumkvv1.RaftLogEntry{Index: entry.Index, Term: entry.Term, Type: encodeEntryType(entry.Type), SessionId: entry.SessionID[:]}
 		}
 		request.Message = &quorumkvv1.SendRequest_AppendEntriesRequest{AppendEntriesRequest: &quorumkvv1.AppendEntriesRequest{Term: action.Request.Term, PreviousLogIndex: action.Request.PrevLogIndex, PreviousLogTerm: action.Request.PrevLogTerm, Entries: entries, LeaderCommit: action.Request.LeaderCommit}}
 	case raft.SendAppendEntriesResponse:
@@ -232,7 +237,15 @@ func decodeRaftMessage(request *quorumkvv1.SendRequest) (raft.Event, error) {
 			if err != nil {
 				return nil, err
 			}
-			entries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: entryType}
+			if entryType != raft.EntryNoOp && len(entry.SessionId) != 16 {
+				return nil, fmt.Errorf("raft session log entry identity is %d bytes, want 16", len(entry.SessionId))
+			}
+			if entryType == raft.EntryNoOp && len(entry.SessionId) != 0 && len(entry.SessionId) != 16 {
+				return nil, fmt.Errorf("raft log entry session identity is %d bytes, want 16", len(entry.SessionId))
+			}
+			var sessionID raft.SessionID
+			copy(sessionID[:], entry.SessionId)
+			entries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: entryType, SessionID: sessionID}
 		}
 		return raft.AppendEntries{From: from, Term: message.AppendEntriesRequest.Term, PrevLogIndex: message.AppendEntriesRequest.PreviousLogIndex, PrevLogTerm: message.AppendEntriesRequest.PreviousLogTerm, Entries: entries, LeaderCommit: message.AppendEntriesRequest.LeaderCommit}, nil
 	case *quorumkvv1.SendRequest_AppendEntriesResponse:
@@ -243,15 +256,26 @@ func decodeRaftMessage(request *quorumkvv1.SendRequest) (raft.Event, error) {
 }
 
 func encodeEntryType(entryType raft.EntryType) quorumkvv1.RaftEntryType {
-	if entryType == raft.EntryNoOp {
+	switch entryType {
+	case raft.EntryNoOp:
 		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_NO_OP
+	case raft.EntryOpenSession:
+		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_OPEN_SESSION
+	case raft.EntryCloseSession:
+		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_CLOSE_SESSION
 	}
 	return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_UNSPECIFIED
 }
 
 func decodeEntryType(entryType quorumkvv1.RaftEntryType) (raft.EntryType, error) {
-	if entryType != quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_NO_OP {
+	switch entryType {
+	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_NO_OP:
+		return raft.EntryNoOp, nil
+	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_OPEN_SESSION:
+		return raft.EntryOpenSession, nil
+	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_CLOSE_SESSION:
+		return raft.EntryCloseSession, nil
+	default:
 		return 0, fmt.Errorf("raft entry type %s is unsupported", entryType)
 	}
-	return raft.EntryNoOp, nil
 }
