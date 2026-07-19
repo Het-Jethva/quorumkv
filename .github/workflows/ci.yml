@@ -39,6 +39,9 @@ jobs:
           go test -v ./internal/node \
             -run 'Test(ThreeProcesses|LostSetResponse|SetSurvivesLeaderCrashAtEveryMutationBoundary|ThreeProcessesRepairFollower)' \
             2>&1 | tee artifacts/real-process.log
+      - name: Run public Docker failure demo
+        shell: bash
+        run: set -o pipefail; sh demo/run.sh 2>&1 | tee artifacts/docker-demo.log
       - name: Record a replayable seeded failure trace
         run: go run ./cmd/quorumkvsim -seed 20250308 -steps 400 -trace artifacts/simulation-trace.json
       - name: Upload Linux diagnostics
