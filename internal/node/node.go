@@ -43,7 +43,6 @@ type Node struct {
 
 type raftInput struct {
 	event          raft.Event
-	accepted       chan struct{}
 	result         chan proposalResult
 	requestContext context.Context
 }

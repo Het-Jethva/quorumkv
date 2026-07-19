@@ -3,15 +3,19 @@ package node_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Het-Jethva/quorumkv/client"
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
+	"github.com/Het-Jethva/quorumkv/internal/cli"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/node"
 	"google.golang.org/grpc"
@@ -21,7 +25,7 @@ import (
 
 const processTestDeadline = 30 * time.Second
 
-func TestThreeProcessesElectReplacementLeader(t *testing.T) {
+func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	members := make(map[string]config.Member, 3)
 	for index := 1; index <= 3; index++ {
 		members[fmt.Sprintf("node-%d", index)] = config.Member{
@@ -60,6 +64,16 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 	if sessionID == ([16]byte{}) {
 		t.Fatal("OpenSession() returned the zero identity")
 	}
+	setLeader := waitForStableLeader(t, members, nil, processTestDeadline)
+	if output, err := runCLISet(members[setLeader].ClientAddress, sessionID, 1, "opaque", string([]byte{1, 2, 3}), 5*time.Second); err != nil {
+		for _, process := range processes {
+			process.stop()
+		}
+		t.Fatalf("SET through CLI: %v\n%s\nNode output: %#v", err, output, nodeProcessOutputs(processes))
+	} else if !strings.Contains(output, `"stored":true`) {
+		t.Fatalf("SET CLI output = %q, want stored success", output)
+	}
+	first = waitForSingleLeader(t, members, nil, processTestDeadline)
 
 	processes[first].stop()
 	delete(processes, first)
@@ -69,12 +83,29 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 		t.Fatalf("replacement Leader = stopped Node %q", first)
 	}
 	replacementFollower := memberOtherThan(t, members, map[string]bool{first: true, replacement: true})
+	if output, err := runCLISet(replacementFollower.ClientAddress, sessionID, 2, "empty", "", 5*time.Second); err != nil {
+		t.Fatalf("SET empty Value through replacement Leader: %v\n%s", err, output)
+	}
 	sessionClient = client.New(replacementFollower.ClientAddress)
 	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
 	err = sessionClient.CloseSession(requestCtx, sessionID)
 	cancel()
 	if err != nil {
 		t.Fatalf("close replicated Client Session after Leader change: %v", err)
+	}
+
+	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
+	isolationSession, err := sessionClient.OpenSession(requestCtx)
+	cancel()
+	if err != nil {
+		t.Fatalf("open Client Session for Quorum-loss check: %v", err)
+	}
+	isolate := memberIDForAddress(t, members, replacementFollower.ClientAddress)
+	processes[isolate].stop()
+	delete(processes, isolate)
+	output, err := runCLISet(members[replacement].ClientAddress, isolationSession, 1, "must-not-commit", "value", 1500*time.Millisecond)
+	if err == nil || strings.Contains(output, `"stored":true`) {
+		t.Fatalf("SET without Quorum output = %q, error = %v; want timeout or Unavailable without success", output, err)
 	}
 
 	for id, process := range processes {
@@ -85,6 +116,35 @@ func TestThreeProcessesElectReplacementLeader(t *testing.T) {
 		default:
 		}
 	}
+}
+
+func nodeProcessOutputs(processes map[string]*nodeProcess) map[string]string {
+	outputs := make(map[string]string, len(processes))
+	for id, process := range processes {
+		outputs[id] = process.output.String()
+	}
+	return outputs
+}
+
+func runCLISet(address string, sessionID [16]byte, sequence uint64, key, value string, timeout time.Duration) (string, error) {
+	var output bytes.Buffer
+	err := cli.Run([]string{
+		"--address", address,
+		"--timeout", timeout.String(),
+		"set", hex.EncodeToString(sessionID[:]), strconv.FormatUint(sequence, 10), key, value,
+	}, &output)
+	return output.String(), err
+}
+
+func memberIDForAddress(t *testing.T, members map[string]config.Member, address string) string {
+	t.Helper()
+	for id, member := range members {
+		if member.ClientAddress == address {
+			return id
+		}
+	}
+	t.Fatalf("no Cluster member has client address %q", address)
+	return ""
 }
 
 func memberOtherThan(t *testing.T, members map[string]config.Member, excluded map[string]bool) config.Member {
@@ -201,6 +261,23 @@ func waitForSingleLeader(t *testing.T, members map[string]config.Member, exclude
 	t.Fatalf("did not observe one agreed Leader within %v; last status: %#v", timeout, details)
 	return ""
 }
+
+func waitForStableLeader(t *testing.T, members map[string]config.Member, excluded map[string]bool, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		first := waitForSingleLeader(t, members, excluded, time.Until(deadline))
+		time.Sleep(checkQuorumObservationWindow)
+		second := waitForSingleLeader(t, members, excluded, time.Until(deadline))
+		if first == second {
+			return first
+		}
+	}
+	t.Fatalf("did not observe stable Leader within %v", timeout)
+	return ""
+}
+
+const checkQuorumObservationWindow = 1200 * time.Millisecond
 
 func fetchStatus(address string) *quorumkvv1.GetStatusResponse {
 	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))

@@ -29,6 +29,7 @@ const (
 	EntryNoOp EntryType = iota
 	EntryOpenSession
 	EntryCloseSession
+	EntrySet
 )
 
 // SessionID is the replicated identity of one Client Session.
@@ -44,6 +45,9 @@ type LogEntry struct {
 	Term      uint64
 	Type      EntryType
 	SessionID SessionID
+	Sequence  uint64
+	Key       string
+	Value     []byte
 }
 
 // ElectionTimeout reports that the runtime's election timer fired.
@@ -79,6 +83,18 @@ type ProposeSession struct {
 }
 
 func (ProposeSession) isEvent() {}
+
+// ProposeSet asks the current Leader to append one SET command. Value ownership
+// transfers to the core; callers must not mutate it after Step returns.
+type ProposeSet struct {
+	ProposalID ProposalID
+	SessionID  SessionID
+	Sequence   uint64
+	Key        string
+	Value      []byte
+}
+
+func (ProposeSet) isEvent() {}
 
 // PreVoteRequest checks whether an election for Term would be viable without
 // changing any Node's current Term or durable vote.
@@ -406,6 +422,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.logEntriesPersisted(event)
 	case ProposeSession:
 		return n.proposeSession(event)
+	case ProposeSet:
+		return n.proposeSet(event)
 	case PreVoteRequest:
 		return n.handlePreVoteRequest(event)
 	case PreVoteResponse:
@@ -589,6 +607,28 @@ func (n *Node) proposeSession(proposal ProposeSession) []Action {
 	})...)
 }
 
+func (n *Node) proposeSet(proposal ProposeSet) []Action {
+	if n.role != Leader {
+		return []Action{ProposalRejected{ProposalID: proposal.ProposalID, LeaderID: n.leaderID}}
+	}
+	entry := LogEntry{
+		Index:     n.lastLogIndex + 1,
+		Term:      n.term,
+		Type:      EntrySet,
+		SessionID: proposal.SessionID,
+		Sequence:  proposal.Sequence,
+		Key:       proposal.Key,
+		Value:     append([]byte(nil), proposal.Value...),
+	}
+	n.appendEntries([]LogEntry{entry})
+	actions := []Action{ProposalAccepted{ProposalID: proposal.ProposalID, Index: entry.Index}}
+	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
+		purpose:   persistLeaderEntry,
+		term:      n.term,
+		lastIndex: entry.Index,
+	})...)
+}
+
 func (n *Node) heartbeatRound() []Action {
 	if n.role != Leader {
 		return nil
@@ -760,11 +800,11 @@ func (n *Node) persistLog(entries []LogEntry, pending pendingLogPersistence) []A
 	n.nextLogPersistence++
 	id := n.nextLogPersistence
 	n.pendingLog[id] = pending
-	return []Action{PersistLogEntries{PersistenceID: id, Entries: append([]LogEntry(nil), entries...)}}
+	return []Action{PersistLogEntries{PersistenceID: id, Entries: cloneLogEntries(entries)}}
 }
 
 func (n *Node) appendEntries(entries []LogEntry) {
-	n.log = append(n.log, entries...)
+	n.log = append(n.log, cloneLogEntries(entries)...)
 	n.lastLogIndex = n.log[len(n.log)-1].Index
 	n.lastLogTerm = n.log[len(n.log)-1].Term
 }
@@ -784,7 +824,7 @@ func (n *Node) entriesBetween(first, last uint64) []LogEntry {
 	if first == 0 || first > last || last > n.lastLogIndex {
 		return nil
 	}
-	return append([]LogEntry(nil), n.log[first-1:last]...)
+	return cloneLogEntries(n.log[first-1 : last])
 }
 
 func (n *Node) unseenEntries(prevIndex uint64, entries []LogEntry) ([]LogEntry, bool) {
@@ -802,9 +842,18 @@ func (n *Node) unseenEntries(prevIndex uint64, entries []LogEntry) ([]LogEntry, 
 		if entry.Index != n.lastLogIndex+1 {
 			return nil, false
 		}
-		return append([]LogEntry(nil), entries[offset:]...), true
+		return cloneLogEntries(entries[offset:]), true
 	}
 	return nil, true
+}
+
+func cloneLogEntries(entries []LogEntry) []LogEntry {
+	cloned := make([]LogEntry, len(entries))
+	for index, entry := range entries {
+		cloned[index] = entry
+		cloned[index].Value = append([]byte(nil), entry.Value...)
+	}
+	return cloned
 }
 
 func (n *Node) advanceLeaderCommit() []Action {

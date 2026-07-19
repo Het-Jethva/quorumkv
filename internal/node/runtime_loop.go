@@ -48,11 +48,6 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		case <-ctx.Done():
 			return nil
 		case input := <-n.events:
-			// Acceptance means the single owner has dequeued the event; the peer
-			// never receives success for work stranded during shutdown.
-			if input.accepted != nil {
-				close(input.accepted)
-			}
 			event = input.event
 			proposalResults = input.result
 			proposalContext = input.requestContext

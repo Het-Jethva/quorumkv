@@ -52,6 +52,19 @@ func (c *Client) CloseSession(ctx context.Context, sessionID [16]byte) error {
 	})
 }
 
+// Set stores Value under key using the next sequence in sessionID.
+func (c *Client) Set(ctx context.Context, sessionID [16]byte, sequence uint64, key string, value []byte) error {
+	return c.withLeader(ctx, func(client quorumkvv1.ClientServiceClient) error {
+		_, err := client.Set(ctx, &quorumkvv1.SetRequest{
+			SessionId: sessionID[:],
+			Sequence:  sequence,
+			Key:       key,
+			Value:     value,
+		})
+		return err
+	})
+}
+
 func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServiceClient) error) error {
 	address := c.address
 	backoff := initialBackoff
@@ -85,7 +98,7 @@ func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServ
 		}
 		backoff = min(backoff*2, maximumBackoff)
 	}
-	return fmt.Errorf("Client Session command did not reach a stable Leader after %d attempts", maxAttempts)
+	return fmt.Errorf("command did not reach a stable Leader after %d attempts", maxAttempts)
 }
 
 func leaderHint(err error) (string, bool) {
