@@ -424,6 +424,7 @@ type State struct {
 	CommitIndex     uint64
 	LastApplied     uint64
 	LastAppliedTerm uint64
+	SnapshotIndex   uint64
 	ReadReady       bool
 }
 
@@ -612,6 +613,7 @@ func (n *Node) State() State {
 		CommitIndex:     n.commitIndex,
 		LastApplied:     n.lastApplied,
 		LastAppliedTerm: lastAppliedTerm,
+		SnapshotIndex:   n.logBaseIndex,
 		ReadReady:       n.readReady,
 	}
 }

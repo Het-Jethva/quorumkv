@@ -16,6 +16,7 @@ type raftRuntime struct {
 	core              *raft.Node
 	wal               *wal.WAL
 	observeMutation   mutationObserver
+	metrics           *nodeMetrics
 	leaderMutations   map[uint64]raft.LogEntry
 	recoveredSnapshot *snapshot.State
 }
@@ -92,6 +93,9 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 			}); err != nil {
 				return nil, fmt.Errorf("persist Raft hard state: %w", err)
 			}
+			if r.metrics != nil {
+				r.metrics.walSyncs.Add(1)
+			}
 			pending = append(pending, r.core.Step(raft.HardStatePersisted{
 				PersistenceID: persist.PersistenceID,
 			})...)
@@ -107,6 +111,9 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 			}
 			if err := r.wal.SaveLogEntries(entries); err != nil {
 				return nil, fmt.Errorf("persist Raft log entries: %w", err)
+			}
+			if r.metrics != nil {
+				r.metrics.walSyncs.Add(1)
 			}
 			if r.observeMutation != nil && r.core.State().Role == raft.Leader {
 				if r.leaderMutations == nil {
@@ -133,6 +140,9 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 			}
 			if err := r.wal.SaveCommitIndex(persist.CommitIndex); err != nil {
 				return nil, fmt.Errorf("persist Raft commit index: %w", err)
+			}
+			if r.metrics != nil {
+				r.metrics.walSyncs.Add(1)
 			}
 			for _, entry := range committedMutations {
 				r.observeMutation(mutationAfterCommitment, entry)

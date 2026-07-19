@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +44,9 @@ type Node struct {
 	nextProposal    atomic.Uint64
 	nextRead        atomic.Uint64
 	observeMutation mutationObserver
+	metrics         nodeMetrics
+	logger          *slog.Logger
+	lastRole        atomic.Uint32
 }
 
 type raftInput struct {
@@ -59,6 +65,7 @@ func New(cfg config.Config) *Node {
 		events:      make(chan raftInput, 256),
 		runtimeDone: make(chan struct{}),
 	}
+	n.logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	n.publishRaftState(raft.State{ID: raft.NodeID(cfg.Node.ID), Role: raft.Follower})
 	return n
 }
@@ -77,6 +84,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	runtime.observeMutation = n.observeMutation
+	runtime.metrics = &n.metrics
 	defer func() {
 		if err := runtime.close(); err != nil && runErr == nil {
 			runErr = fmt.Errorf("close Node %q consensus state: %w", n.config.Node.ID, err)
@@ -95,8 +103,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	defer clientListener.Close()
 
-	peerServer := grpc.NewServer()
-	clientServer := grpc.NewServer()
+	var metricsListener net.Listener
+	var metricsServer *http.Server
+	if n.config.Node.MetricsAddress != "" {
+		metricsListener, err = net.Listen("tcp", n.config.Node.MetricsAddress)
+		if err != nil {
+			return fmt.Errorf("listen on metrics address %q: %w", n.config.Node.MetricsAddress, err)
+		}
+		defer metricsListener.Close()
+		metricsServer = &http.Server{Handler: n.metrics.handler(), ReadHeaderTimeout: 5 * time.Second}
+		defer metricsServer.Close()
+	}
+
+	peerServer := grpc.NewServer(grpc.UnaryInterceptor(n.metricsInterceptor))
+	clientServer := grpc.NewServer(grpc.UnaryInterceptor(n.metricsInterceptor))
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus(LivenessService, grpc_health_v1.HealthCheckResponse_SERVING)
@@ -129,6 +149,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	servers.Add(2)
 	go serve("peer", peerServer, peerListener)
 	go serve("client", clientServer, clientListener)
+	if metricsServer != nil {
+		servers.Add(1)
+		go func() {
+			defer servers.Done()
+			if err := metricsServer.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serveErrors <- fmt.Errorf("serve metrics endpoint: %w", err)
+			}
+		}()
+	}
 	servers.Add(1)
 	go func() {
 		defer servers.Done()
@@ -143,6 +172,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	case runErr = <-serveErrors:
 	}
 	cancel()
+	if metricsServer != nil {
+		_ = metricsServer.Shutdown(context.Background())
+	}
 
 	n.ready.Store(false)
 	healthServer.SetServingStatus(ReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
@@ -187,10 +219,29 @@ func (n *Node) GetStatus(context.Context, *quorumkvv1.GetStatusRequest) (*quorum
 		Role:          encodeRole(raftState.Role),
 		LeaderId:      string(raftState.LeaderID),
 		Term:          raftState.Term,
+		LastLogIndex:  raftState.LastLogIndex,
+		CommitIndex:   raftState.CommitIndex,
+		LastApplied:   raftState.LastApplied,
+		SnapshotIndex: raftState.SnapshotIndex,
 	}, nil
 }
 
-func (n *Node) publishRaftState(state raft.State) { n.raftState.Store(state) }
+func (n *Node) publishRaftState(state raft.State) {
+	n.raftState.Store(state)
+	role := uint32(state.Role)
+	if n.lastRole.Swap(role) != role && n.logger != nil {
+		n.logger.Info("Raft role changed", "node_id", state.ID, "term", state.Term, "role", encodeRole(state.Role).String(), "leader_id", state.LeaderID, "last_log_index", state.LastLogIndex, "commit_index", state.CommitIndex, "last_applied", state.LastApplied, "snapshot_index", state.SnapshotIndex)
+	}
+}
+
+func (n *Node) metricsInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	response, err := handler(ctx, req)
+	n.metrics.observeRPC(err)
+	if err != nil {
+		n.metrics.clientErrors.Add(1)
+	}
+	return response, err
+}
 
 func encodeRole(role raft.Role) quorumkvv1.RaftRole {
 	switch role {

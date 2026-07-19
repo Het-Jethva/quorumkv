@@ -69,6 +69,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		if snapshotRunning {
 			return
 		}
+		n.metrics.snapshots.Add(1)
 		state := runtime.core.State()
 		captured := sessions.snapshot(snapshotIdentity(n.config), state.LastApplied, state.LastAppliedTerm)
 		snapshotRunning = true
@@ -156,6 +157,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				return fmt.Errorf("automatic Snapshot: %w", completion.err)
 			}
 			if completion.err == nil {
+				n.metrics.compactions.Add(1)
 				if _, err := runtime.step(raft.SnapshotCompacted{Index: completion.index, Term: completion.term}); err != nil {
 					return err
 				}
@@ -205,6 +207,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 						if err := sessions.restore(state); err != nil {
 							return fmt.Errorf("restore received Snapshot: %w", err)
 						}
+						n.metrics.snapshotInstalls.Add(1)
 						request.Installed = true
 					} else {
 						request.Success = false
@@ -245,6 +248,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			case raft.SendPreVoteRequest, raft.SendPreVoteResponse, raft.SendVoteRequest,
 				raft.SendVoteResponse, raft.SendAppendEntries, raft.SendAppendEntriesResponse,
 				raft.SendInstallSnapshot, raft.SendInstallSnapshotResponse:
+				n.metrics.raftRPCs.Add(1)
 				// A missing peer is ordinary during startup, elections, and process loss.
 				// The next timer or inbound message retries protocol progress.
 				if err := transport.send(ctx, action); err != nil {
@@ -276,6 +280,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			case raft.ResetCheckQuorumTimer:
 				quorumTimer, quorumC = resetOptionalTimer(quorumTimer, checkQuorumWindow)
 			case raft.ProposalAccepted:
+				n.metrics.proposals.Add(1)
 				if proposalResults != nil && proposalContext != nil {
 					pending[action.Index] = append(pending[action.Index], pendingProposal{result: proposalResults, ctx: proposalContext})
 				}
@@ -300,7 +305,9 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 					}
 					delete(pending, action.Entry.Index)
 				}
-			case raft.BecameLeader, raft.BecameReadReady, raft.LostLeadership:
+			case raft.BecameLeader:
+				n.metrics.elections.Add(1)
+			case raft.BecameReadReady, raft.LostLeadership:
 				// Role and progress are read from the core after all actions finish.
 			case raft.ReadConfirmed:
 				read, ok := pendingReads[action.ReadID]

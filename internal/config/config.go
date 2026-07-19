@@ -25,8 +25,9 @@ type Config struct {
 
 // Node contains settings owned by this process.
 type Node struct {
-	ID      string `yaml:"id"`
-	DataDir string `yaml:"data_dir"`
+	ID             string `yaml:"id"`
+	DataDir        string `yaml:"data_dir"`
+	MetricsAddress string `yaml:"metrics_address,omitempty"`
 }
 
 // Member contains the runtime addresses for one configured Cluster member.
@@ -80,6 +81,11 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Node.DataDir) == "" {
 		problems = append(problems, errors.New("node.data_dir is required"))
+	}
+	if c.Node.MetricsAddress != "" {
+		if err := validateAddress("node.metrics_address", c.Node.MetricsAddress); err != nil {
+			problems = append(problems, err)
+		}
 	}
 	if len(c.Members) != 3 {
 		problems = append(problems, fmt.Errorf("members must contain exactly three Nodes, got %d", len(c.Members)))
