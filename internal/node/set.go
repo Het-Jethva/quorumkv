@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"unicode/utf8"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
@@ -18,23 +17,11 @@ const (
 // Set stores an opaque Value after its command is durably committed and
 // applied. Cancellation only stops waiting; it cannot retract a proposal.
 func (n *Node) Set(ctx context.Context, request *quorumkvv1.SetRequest) (*quorumkvv1.SetResponse, error) {
-	if len(request.SessionId) != len(raft.SessionID{}) {
-		return nil, status.Errorf(codes.InvalidArgument, "Client Session identity is %d bytes, want 16", len(request.SessionId))
-	}
-	if request.Sequence == 0 {
-		return nil, status.Error(codes.InvalidArgument, "mutation sequence must begin at one")
-	}
-	if request.Key == "" {
-		return nil, status.Error(codes.InvalidArgument, "Key must not be empty")
-	}
-	if !utf8.ValidString(request.Key) {
-		return nil, status.Error(codes.InvalidArgument, "Key must be valid UTF-8")
-	}
-	if len(request.Key) > maxKeyBytes {
-		return nil, status.Errorf(codes.InvalidArgument, "Key is %d bytes, limit is %d", len(request.Key), maxKeyBytes)
+	if err := validateMutation(request.SessionId, request.Sequence, request.Key); err != nil {
+		return nil, err
 	}
 	if len(request.Value) > maxValueBytes {
-		return nil, status.Errorf(codes.InvalidArgument, "Value is %d bytes, limit is %d", len(request.Value), maxValueBytes)
+		return nil, validationError("value", "Value is %d bytes, limit is %d", len(request.Value), maxValueBytes)
 	}
 	if result, rejected := n.rejectIfNotLeader(); rejected {
 		return nil, n.proposalError(result)

@@ -238,6 +238,19 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 		t.Fatal("OpenSession() returned the zero identity")
 	}
 	setLeader := waitForStableLeader(t, members, nil, processTestDeadline)
+	connection, err := grpc.NewClient(members[setLeader].ClientAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("connect to Leader for public validation check: %v", err)
+	}
+	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = quorumkvv1.NewClientServiceClient(connection).Set(requestCtx, &quorumkvv1.SetRequest{
+		SessionId: sessionID[:], Sequence: 1, Key: "opaque", Value: make([]byte, (1<<20)+1),
+	})
+	cancel()
+	connection.Close()
+	if status.Code(err) != codes.InvalidArgument || !hasValidationDetail(err, "value") {
+		t.Fatalf("oversized Value error = %v, want typed value validation error", err)
+	}
 	if output, err := runCLISet(members[setLeader].ClientAddress, sessionID, 1, "opaque", string([]byte{1, 2, 3}), 5*time.Second); err != nil {
 		for _, process := range processes {
 			process.stop()
@@ -284,12 +297,41 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	if output, err := runCLISet(replacementFollower.ClientAddress, sessionID, 3, "empty", "", 5*time.Second); err != nil {
 		t.Fatalf("SET empty Value through replacement Leader: %v\n%s", err, output)
 	}
+	emptyOutput, err := runCLIGet(replacementFollower.ClientAddress, "empty", 5*time.Second)
+	if err != nil {
+		t.Fatalf("GET present empty Value: %v\n%s", err, emptyOutput)
+	}
+	var emptyResult struct {
+		Value []byte `json:"value"`
+		Found bool   `json:"found"`
+	}
+	if err := json.Unmarshal([]byte(emptyOutput), &emptyResult); err != nil || !emptyResult.Found || len(emptyResult.Value) != 0 {
+		t.Fatalf("GET empty Value output = %q, decoded=%#v, error=%v; want found empty bytes", emptyOutput, emptyResult, err)
+	}
+	deleteOutput, err := runCLIDelete(replacementFollower.ClientAddress, sessionID, 4, "empty", 5*time.Second)
+	if err != nil || !strings.Contains(deleteOutput, `"existed":true`) {
+		t.Fatalf("DELETE existing Key output = %q, error = %v; want existed=true", deleteOutput, err)
+	}
+	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = client.New(replacementFollower.ClientAddress).Get(requestCtx, "empty")
+	cancel()
+	if status.Code(err) != codes.NotFound || !hasKeyNotFoundDetail(err, "empty") {
+		t.Fatalf("GET deleted Key error = %v, want typed NotFound", err)
+	}
+	deleteOutput, err = runCLIDelete(replacementFollower.ClientAddress, sessionID, 5, "empty", 5*time.Second)
+	if err != nil || !strings.Contains(deleteOutput, `"existed":false`) {
+		t.Fatalf("DELETE missing Key output = %q, error = %v; want existed=false", deleteOutput, err)
+	}
 	sessionClient = client.New(replacementFollower.ClientAddress)
 	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
 	err = sessionClient.CloseSession(requestCtx, sessionID)
 	cancel()
 	if err != nil {
 		t.Fatalf("close replicated Client Session after Leader change: %v", err)
+	}
+	deleteOutput, err = runCLIDelete(replacementFollower.ClientAddress, sessionID, 6, "empty", 5*time.Second)
+	if status.Code(err) != codes.FailedPrecondition || !hasInvalidSessionDetail(err, quorumkvv1.InvalidSessionReason_INVALID_SESSION_REASON_CLOSED) {
+		t.Fatalf("DELETE with closed Client Session output = %q, error = %v; want typed closed Session", deleteOutput, err)
 	}
 
 	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
@@ -344,6 +386,46 @@ func runCLIGet(address, key string, timeout time.Duration) (string, error) {
 	var output bytes.Buffer
 	err := cli.Run([]string{"--address", address, "--timeout", timeout.String(), "get", key}, &output)
 	return output.String(), err
+}
+
+func runCLIDelete(address string, sessionID [16]byte, sequence uint64, key string, timeout time.Duration) (string, error) {
+	var output bytes.Buffer
+	err := cli.Run([]string{
+		"--address", address,
+		"--timeout", timeout.String(),
+		"delete", hex.EncodeToString(sessionID[:]), strconv.FormatUint(sequence, 10), key,
+	}, &output)
+	return output.String(), err
+}
+
+func hasValidationDetail(err error, field string) bool {
+	for _, detail := range status.Convert(err).Details() {
+		validation, ok := detail.(*quorumkvv1.ValidationError)
+		if ok && validation.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
+func hasKeyNotFoundDetail(err error, key string) bool {
+	for _, detail := range status.Convert(err).Details() {
+		notFound, ok := detail.(*quorumkvv1.KeyNotFound)
+		if ok && notFound.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInvalidSessionDetail(err error, reason quorumkvv1.InvalidSessionReason) bool {
+	for _, detail := range status.Convert(err).Details() {
+		invalid, ok := detail.(*quorumkvv1.InvalidSession)
+		if ok && invalid.Reason == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func memberIDForAddress(t *testing.T, members map[string]config.Member, address string) string {

@@ -30,6 +30,7 @@ type proposalResult struct {
 	wantSequence uint64
 	leaderID     raft.NodeID
 	rejected     bool
+	existed      bool
 }
 
 type sessionState uint8
@@ -52,6 +53,7 @@ type sessionRecord struct {
 	state              sessionState
 	lastSequence       uint64
 	lastMutationResult sessionFailure
+	lastDeleteExisted  bool
 }
 
 func newSessionMachine(limit int) *sessionMachine {
@@ -90,7 +92,7 @@ func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
 		m.active--
 		return result
 	case raft.EntrySet:
-		result, apply := m.evaluateSet(entry.SessionID, entry.Sequence)
+		result, apply := m.evaluateMutation(entry.SessionID, entry.Sequence)
 		if !apply {
 			return result
 		}
@@ -98,6 +100,20 @@ func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
 		m.values[entry.Key] = append([]byte(nil), entry.Value...)
 		record.lastSequence = entry.Sequence
 		record.lastMutationResult = result.failure
+		record.lastDeleteExisted = false
+		m.sessions[entry.SessionID] = record
+		return result
+	case raft.EntryDelete:
+		result, apply := m.evaluateMutation(entry.SessionID, entry.Sequence)
+		if !apply {
+			return result
+		}
+		record := m.sessions[entry.SessionID]
+		_, result.existed = m.values[entry.Key]
+		delete(m.values, entry.Key)
+		record.lastSequence = entry.Sequence
+		record.lastMutationResult = result.failure
+		record.lastDeleteExisted = result.existed
 		m.sessions[entry.SessionID] = record
 		return result
 	default:
@@ -105,9 +121,9 @@ func (m *sessionMachine) apply(entry raft.LogEntry) proposalResult {
 	}
 }
 
-// evaluateSet decides whether a SET is the next mutation to apply. The latest
+// evaluateMutation decides whether a command is the next mutation to apply. The latest
 // sequence replays its cached result, so a retry never creates a second effect.
-func (m *sessionMachine) evaluateSet(sessionID raft.SessionID, sequence uint64) (proposalResult, bool) {
+func (m *sessionMachine) evaluateMutation(sessionID raft.SessionID, sequence uint64) (proposalResult, bool) {
 	result := proposalResult{sessionID: sessionID, sequence: sequence}
 	record, exists := m.sessions[sessionID]
 	if !exists {
@@ -120,6 +136,7 @@ func (m *sessionMachine) evaluateSet(sessionID raft.SessionID, sequence uint64) 
 	}
 	if sequence == record.lastSequence && sequence != 0 {
 		result.failure = record.lastMutationResult
+		result.existed = record.lastDeleteExisted
 		return result, false
 	}
 	if sequence < record.lastSequence {
@@ -157,7 +174,7 @@ func (n *Node) OpenSession(ctx context.Context, _ *quorumkvv1.OpenSessionRequest
 
 func (n *Node) CloseSession(ctx context.Context, request *quorumkvv1.CloseSessionRequest) (*quorumkvv1.CloseSessionResponse, error) {
 	if len(request.SessionId) != len(raft.SessionID{}) {
-		return nil, status.Errorf(codes.InvalidArgument, "Client Session identity is %d bytes, want 16", len(request.SessionId))
+		return nil, validationError("session_id", "Client Session identity is %d bytes, want 16", len(request.SessionId))
 	}
 	var sessionID raft.SessionID
 	copy(sessionID[:], request.SessionId)
@@ -209,9 +226,19 @@ func (n *Node) proposalError(result proposalResult) error {
 	case sessionLimitReached:
 		return status.Errorf(codes.ResourceExhausted, "active Client Session limit %d reached", n.config.ActiveSessionLimit)
 	case sessionUnknown:
-		return status.Error(codes.NotFound, "Client Session is unknown")
+		base := status.New(codes.NotFound, "Client Session is unknown")
+		withDetails, err := base.WithDetails(&quorumkvv1.InvalidSession{SessionId: result.sessionID[:], Reason: quorumkvv1.InvalidSessionReason_INVALID_SESSION_REASON_UNKNOWN})
+		if err != nil {
+			return base.Err()
+		}
+		return withDetails.Err()
 	case sessionClosed:
-		return status.Error(codes.FailedPrecondition, "Client Session is closed and cannot be reused")
+		base := status.New(codes.FailedPrecondition, "Client Session is closed and cannot be reused")
+		withDetails, err := base.WithDetails(&quorumkvv1.InvalidSession{SessionId: result.sessionID[:], Reason: quorumkvv1.InvalidSessionReason_INVALID_SESSION_REASON_CLOSED})
+		if err != nil {
+			return base.Err()
+		}
+		return withDetails.Err()
 	case sessionAlreadyExists:
 		return status.Error(codes.AlreadyExists, "Client Session identity was already used and cannot be reopened")
 	case sessionStaleSequence:

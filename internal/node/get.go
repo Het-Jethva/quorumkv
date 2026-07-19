@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"unicode/utf8"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
@@ -19,14 +18,8 @@ type readResult struct {
 
 // Get returns a Value only after Raft confirms the Leader's current authority.
 func (n *Node) Get(ctx context.Context, request *quorumkvv1.GetRequest) (*quorumkvv1.GetResponse, error) {
-	if request.Key == "" {
-		return nil, status.Error(codes.InvalidArgument, "Key must not be empty")
-	}
-	if !utf8.ValidString(request.Key) {
-		return nil, status.Error(codes.InvalidArgument, "Key must be valid UTF-8")
-	}
-	if len(request.Key) > maxKeyBytes {
-		return nil, status.Errorf(codes.InvalidArgument, "Key is %d bytes, limit is %d", len(request.Key), maxKeyBytes)
+	if err := validateKey(request.Key); err != nil {
+		return nil, err
 	}
 	if result, rejected := n.rejectIfNotLeader(); rejected {
 		return nil, n.proposalError(result)
@@ -49,7 +42,12 @@ func (n *Node) Get(ctx context.Context, request *quorumkvv1.GetRequest) (*quorum
 			return nil, n.proposalError(proposalResult{leaderID: result.leaderID, rejected: true})
 		}
 		if !result.found {
-			return nil, status.Errorf(codes.NotFound, "Key %q was not found", request.Key)
+			base := status.Newf(codes.NotFound, "Key %q was not found", request.Key)
+			withDetails, err := base.WithDetails(&quorumkvv1.KeyNotFound{Key: request.Key})
+			if err != nil {
+				return nil, base.Err()
+			}
+			return nil, withDetails.Err()
 		}
 		return &quorumkvv1.GetResponse{Value: result.value}, nil
 	case <-n.runtimeDone:

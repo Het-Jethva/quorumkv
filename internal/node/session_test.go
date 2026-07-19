@@ -131,6 +131,37 @@ func TestSessionMachineStoresCopiedOpaqueAndEmptyValuesInSequence(t *testing.T) 
 	}
 }
 
+func TestSessionMachineDeletesIdempotentlyAndCachesResult(t *testing.T) {
+	machine := newSessionMachine(1)
+	sessionID := raft.SessionID{1}
+	machine.apply(raft.LogEntry{Type: raft.EntryOpenSession, SessionID: sessionID})
+	machine.apply(raft.LogEntry{Type: raft.EntrySet, SessionID: sessionID, Sequence: 1, Key: "key", Value: []byte("value")})
+
+	first := machine.apply(raft.LogEntry{Type: raft.EntryDelete, SessionID: sessionID, Sequence: 2, Key: "key"})
+	if first.failure != sessionSucceeded || !first.existed {
+		t.Fatalf("DELETE existing Key = %#v, want success with existed=true", first)
+	}
+	if _, exists := machine.values["key"]; exists {
+		t.Fatal("DELETE left the Key present")
+	}
+
+	// A different Client Session may recreate the Key before the response is
+	// retried. The duplicate must still return the committed original result.
+	machine.values["key"] = []byte("replacement")
+	duplicate := machine.apply(raft.LogEntry{Type: raft.EntryDelete, SessionID: sessionID, Sequence: 2, Key: "key"})
+	if duplicate.failure != sessionSucceeded || !duplicate.existed {
+		t.Fatalf("duplicate DELETE = %#v, want cached existed=true", duplicate)
+	}
+	if got := string(machine.values["key"]); got != "replacement" {
+		t.Fatalf("duplicate DELETE changed recreated Value to %q", got)
+	}
+
+	missing := machine.apply(raft.LogEntry{Type: raft.EntryDelete, SessionID: sessionID, Sequence: 3, Key: "missing"})
+	if missing.failure != sessionSucceeded || missing.existed {
+		t.Fatalf("DELETE missing Key = %#v, want success with existed=false", missing)
+	}
+}
+
 func TestSequenceFailuresHaveDistinctTypedDetails(t *testing.T) {
 	n := New(config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1"}})
 	tests := []struct {
@@ -170,14 +201,15 @@ func TestSetRejectsInvalidInputBeforeProposal(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
+		field  string
 		change func(*quorumkvv1.SetRequest)
 	}{
-		{name: "session identity", change: func(request *quorumkvv1.SetRequest) { request.SessionId = nil }},
-		{name: "zero sequence", change: func(request *quorumkvv1.SetRequest) { request.Sequence = 0 }},
-		{name: "empty Key", change: func(request *quorumkvv1.SetRequest) { request.Key = "" }},
-		{name: "invalid UTF-8 Key", change: func(request *quorumkvv1.SetRequest) { request.Key = string([]byte{0xff}) }},
-		{name: "oversized Key", change: func(request *quorumkvv1.SetRequest) { request.Key = strings.Repeat("k", maxKeyBytes+1) }},
-		{name: "oversized Value", change: func(request *quorumkvv1.SetRequest) { request.Value = make([]byte, maxValueBytes+1) }},
+		{name: "session identity", field: "session_id", change: func(request *quorumkvv1.SetRequest) { request.SessionId = nil }},
+		{name: "zero sequence", field: "sequence", change: func(request *quorumkvv1.SetRequest) { request.Sequence = 0 }},
+		{name: "empty Key", field: "key", change: func(request *quorumkvv1.SetRequest) { request.Key = "" }},
+		{name: "invalid UTF-8 Key", field: "key", change: func(request *quorumkvv1.SetRequest) { request.Key = string([]byte{0xff}) }},
+		{name: "oversized Key", field: "key", change: func(request *quorumkvv1.SetRequest) { request.Key = strings.Repeat("k", maxKeyBytes+1) }},
+		{name: "oversized Value", field: "value", change: func(request *quorumkvv1.SetRequest) { request.Value = make([]byte, maxValueBytes+1) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -187,7 +219,31 @@ func TestSetRejectsInvalidInputBeforeProposal(t *testing.T) {
 			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("Set() error = %v, want InvalidArgument", err)
 			}
+			details := status.Convert(err).Details()
+			if len(details) != 1 {
+				t.Fatalf("Set() error details = %#v, want one ValidationError for %q", details, test.field)
+			}
+			validation, ok := details[0].(*quorumkvv1.ValidationError)
+			if !ok || validation.Field != test.field {
+				t.Fatalf("Set() error details = %#v, want ValidationError for %q", details, test.field)
+			}
 		})
+	}
+}
+
+func TestDeleteRejectsInvalidInputBeforeProposal(t *testing.T) {
+	n := New(config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1"}})
+	requests := []*quorumkvv1.DeleteRequest{
+		{Sequence: 1, Key: "key"},
+		{SessionId: make([]byte, 16), Key: "key"},
+		{SessionId: make([]byte, 16), Sequence: 1},
+		{SessionId: make([]byte, 16), Sequence: 1, Key: string([]byte{0xff})},
+		{SessionId: make([]byte, 16), Sequence: 1, Key: strings.Repeat("k", maxKeyBytes+1)},
+	}
+	for _, request := range requests {
+		if _, err := n.Delete(context.Background(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("Delete(%#v) error = %v, want InvalidArgument before NotLeader", request, err)
+		}
 	}
 }
 
