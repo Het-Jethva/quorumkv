@@ -126,8 +126,19 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				raft.SendVoteResponse, raft.SendAppendEntries, raft.SendAppendEntriesResponse:
 				// A missing peer is ordinary during startup, elections, and process loss.
 				// The next timer or inbound message retries protocol progress.
-				if err := transport.send(ctx, action); isPeerConfigurationError(err) {
-					return err
+				if err := transport.send(ctx, action); err != nil {
+					if isPeerConfigurationError(err) {
+						return err
+					}
+					if appendAction, ok := action.(raft.SendAppendEntries); ok {
+						failed, stepErr := runtime.step(raft.AppendEntriesFailed{To: appendAction.To, RequestID: appendAction.Request.RequestID})
+						if stepErr != nil {
+							return stepErr
+						}
+						if len(failed) != 0 {
+							return fmt.Errorf("report failed AppendEntries delivery: unexpected Raft actions %T", failed[0])
+						}
+					}
 				}
 			case raft.ResetElectionTimer:
 				resetTimer(electionTimer, randomElectionTimeout(random))

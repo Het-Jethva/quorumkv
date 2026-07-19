@@ -1729,6 +1729,7 @@ type AppendEntriesRequest struct {
 	Entries          []*RaftLogEntry        `protobuf:"bytes,4,rep,name=entries,proto3" json:"entries,omitempty"`
 	LeaderCommit     uint64                 `protobuf:"varint,5,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
 	ReadId           uint64                 `protobuf:"varint,6,opt,name=read_id,json=readId,proto3" json:"read_id,omitempty"`
+	RequestId        uint64                 `protobuf:"varint,7,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1805,12 +1806,22 @@ func (x *AppendEntriesRequest) GetReadId() uint64 {
 	return 0
 }
 
+func (x *AppendEntriesRequest) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
 	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
 	MatchIndex    uint64                 `protobuf:"varint,3,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"`
 	ReadId        uint64                 `protobuf:"varint,4,opt,name=read_id,json=readId,proto3" json:"read_id,omitempty"`
+	RequestId     uint64                 `protobuf:"varint,5,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ConflictTerm  uint64                 `protobuf:"varint,6,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
+	ConflictIndex uint64                 `protobuf:"varint,7,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1869,6 +1880,27 @@ func (x *AppendEntriesResponse) GetMatchIndex() uint64 {
 func (x *AppendEntriesResponse) GetReadId() uint64 {
 	if x != nil {
 		return x.ReadId
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetConflictTerm() uint64 {
+	if x != nil {
+		return x.ConflictTerm
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetConflictIndex() uint64 {
+	if x != nil {
+		return x.ConflictIndex
 	}
 	return 0
 }
@@ -2070,20 +2102,26 @@ const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\rlast_log_term\x18\x03 \x01(\x04R\vlastLogTerm\"<\n" +
 	"\fVoteResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
-	"\agranted\x18\x02 \x01(\bR\agranted\"\xf7\x01\n" +
+	"\agranted\x18\x02 \x01(\bR\agranted\"\x96\x02\n" +
 	"\x14AppendEntriesRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12,\n" +
 	"\x12previous_log_index\x18\x02 \x01(\x04R\x10previousLogIndex\x12*\n" +
 	"\x11previous_log_term\x18\x03 \x01(\x04R\x0fpreviousLogTerm\x123\n" +
 	"\aentries\x18\x04 \x03(\v2\x19.quorumkv.v1.RaftLogEntryR\aentries\x12#\n" +
 	"\rleader_commit\x18\x05 \x01(\x04R\fleaderCommit\x12\x17\n" +
-	"\aread_id\x18\x06 \x01(\x04R\x06readId\"\x7f\n" +
+	"\aread_id\x18\x06 \x01(\x04R\x06readId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\a \x01(\x04R\trequestId\"\xea\x01\n" +
 	"\x15AppendEntriesResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1f\n" +
 	"\vmatch_index\x18\x03 \x01(\x04R\n" +
 	"matchIndex\x12\x17\n" +
-	"\aread_id\x18\x04 \x01(\x04R\x06readId\"\xcb\x01\n" +
+	"\aread_id\x18\x04 \x01(\x04R\x06readId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x05 \x01(\x04R\trequestId\x12#\n" +
+	"\rconflict_term\x18\x06 \x01(\x04R\fconflictTerm\x12%\n" +
+	"\x0econflict_index\x18\a \x01(\x04R\rconflictIndex\"\xcb\x01\n" +
 	"\fRaftLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12.\n" +

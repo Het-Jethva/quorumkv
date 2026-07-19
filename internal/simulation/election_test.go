@@ -289,3 +289,68 @@ func TestCheckQuorumDemotesIsolatedLeaderAndMajorityElects(t *testing.T) {
 		t.Fatal("isolated minority retained an authoritative Leader")
 	}
 }
+
+func TestHealedFollowerReplacesConflictingSuffixAndReachesCommittedState(t *testing.T) {
+	cluster := newCluster(t, 42)
+	oldLeader := electLeader(t, cluster)
+	var majority []raft.NodeID
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if id != oldLeader {
+			majority = append(majority, id)
+		}
+	}
+
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("start fresh check-quorum window: %v", err)
+	}
+	cluster.Partition(majority, []raft.NodeID{oldLeader})
+	if err := cluster.ProposeSet(oldLeader, raft.ProposeSet{ProposalID: 1, Key: "conflict", Value: []byte("isolated")}); err != nil {
+		t.Fatalf("append isolated uncommitted SET: %v", err)
+	}
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("demote isolated Leader: %v", err)
+	}
+	for _, id := range majority {
+		if err := cluster.FireElectionTimeout(id); err != nil {
+			t.Fatalf("fire election timeout for %s: %v", id, err)
+		}
+	}
+	var leader raft.NodeID
+	for _, id := range majority {
+		if cluster.State(id).Role == raft.Leader {
+			leader = id
+		}
+	}
+	if leader == "" {
+		t.Fatal("surviving Quorum elected no replacement Leader")
+	}
+	if err := cluster.ProposeSet(leader, raft.ProposeSet{ProposalID: 2, Key: "committed", Value: []byte("majority")}); err != nil {
+		t.Fatalf("commit majority SET: %v", err)
+	}
+
+	cluster.Heal()
+	if err := cluster.FireHeartbeatTimeout(leader); err != nil {
+		t.Fatalf("repair healed Follower: %v", err)
+	}
+	wantState := cluster.State(leader)
+	gotState := cluster.State(oldLeader)
+	if gotState.LastLogIndex != wantState.LastLogIndex || gotState.CommitIndex != wantState.CommitIndex || gotState.LastApplied != wantState.LastApplied {
+		t.Fatalf("healed Follower state = %#v, Leader state = %#v", gotState, wantState)
+	}
+	if got, want := cluster.AppliedEntries(oldLeader), cluster.AppliedEntries(leader); !reflect.DeepEqual(got, want) {
+		t.Fatalf("healed Follower applied entries = %#v, want Leader entries %#v", got, want)
+	}
+
+	conflictRejections := 0
+	for _, step := range cluster.Trace() {
+		for _, action := range step.Actions {
+			response, ok := action.(raft.SendAppendEntriesResponse)
+			if ok && !response.Response.Success && response.Response.ConflictIndex != 0 {
+				conflictRejections++
+			}
+		}
+	}
+	if conflictRejections == 0 {
+		t.Fatal("repair trace contained no conflict-hint rejection")
+	}
+}

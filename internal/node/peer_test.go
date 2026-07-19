@@ -56,11 +56,11 @@ func TestPeerAdapterRoundTripsInternalRaftMessages(t *testing.T) {
 		raft.SendPreVoteResponse{To: "node-2", Response: raft.PreVoteResponse{From: "node-1", Term: 2, CurrentTerm: 1, Granted: true}},
 		raft.SendVoteRequest{To: "node-2", Request: raft.VoteRequest{From: "node-1", Term: 2, LastLogIndex: 3, LastLogTerm: 1}},
 		raft.SendVoteResponse{To: "node-2", Response: raft.VoteResponse{From: "node-1", Term: 2, Granted: true}},
-		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 2, PrevLogIndex: 2, PrevLogTerm: 1, Entries: []raft.LogEntry{
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 2, RequestID: 17, PrevLogIndex: 2, PrevLogTerm: 1, Entries: []raft.LogEntry{
 			{Index: 3, Term: 2, Type: raft.EntrySet, SessionID: raft.SessionID{1}, Sequence: 7, Key: "opaque", Value: []byte{0, 255}},
 			{Index: 4, Term: 2, Type: raft.EntryDelete, SessionID: raft.SessionID{1}, Sequence: 8, Key: "opaque"},
 		}, LeaderCommit: 2, ReadID: 11}},
-		raft.SendAppendEntriesResponse{To: "node-2", Response: raft.AppendEntriesResponse{From: "node-1", Term: 2, Success: true, MatchIndex: 3, ReadID: 11}},
+		raft.SendAppendEntriesResponse{To: "node-2", Response: raft.AppendEntriesResponse{From: "node-1", Term: 2, RequestID: 17, MatchIndex: 3, ConflictTerm: 1, ConflictIndex: 2, ReadID: 11}},
 	}
 	for _, action := range actions {
 		to, request, err := encodeRaftAction(cfg, action)
@@ -76,6 +76,9 @@ func TestPeerAdapterRoundTripsInternalRaftMessages(t *testing.T) {
 		}
 		if appendAction, ok := action.(raft.SendAppendEntries); ok && !reflect.DeepEqual(decoded, appendAction.Request) {
 			t.Fatalf("decoded AppendEntries = %#v, want %#v", decoded, appendAction.Request)
+		}
+		if responseAction, ok := action.(raft.SendAppendEntriesResponse); ok && !reflect.DeepEqual(decoded, responseAction.Response) {
+			t.Fatalf("decoded AppendEntries response = %#v, want %#v", decoded, responseAction.Response)
 		}
 	}
 }
