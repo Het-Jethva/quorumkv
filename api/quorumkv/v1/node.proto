@@ -13,6 +13,7 @@ service ClientService {
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
   rpc Set(SetRequest) returns (SetResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
 
 service PeerService {
@@ -49,6 +50,40 @@ message GetRequest {
 
 message GetResponse {
   bytes value = 1;
+}
+
+message DeleteRequest {
+  bytes session_id = 1;
+  uint64 sequence = 2;
+  string key = 3;
+}
+
+message DeleteResponse {
+  bool existed = 1;
+}
+
+// ValidationError identifies the request field rejected before a command is
+// proposed to Raft.
+message ValidationError {
+  string field = 1;
+}
+
+// KeyNotFound distinguishes a missing Key from a present empty Value.
+message KeyNotFound {
+  string key = 1;
+}
+
+// InvalidSession distinguishes an unknown or permanently closed Client
+// Session from other command failures.
+message InvalidSession {
+  bytes session_id = 1;
+  InvalidSessionReason reason = 2;
+}
+
+enum InvalidSessionReason {
+  INVALID_SESSION_REASON_UNSPECIFIED = 0;
+  INVALID_SESSION_REASON_UNKNOWN = 1;
+  INVALID_SESSION_REASON_CLOSED = 2;
 }
 
 // StaleSequence identifies a mutation older than the latest mutation whose
@@ -184,4 +219,5 @@ enum RaftEntryType {
   RAFT_ENTRY_TYPE_OPEN_SESSION = 2;
   RAFT_ENTRY_TYPE_CLOSE_SESSION = 3;
   RAFT_ENTRY_TYPE_SET = 4;
+  RAFT_ENTRY_TYPE_DELETE = 5;
 }

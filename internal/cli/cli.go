@@ -41,6 +41,9 @@ func Run(args []string, output io.Writer) error {
 	if flags.Arg(0) == "get" {
 		return runGet(ctx, output, *address, flags.Args()[1:])
 	}
+	if flags.Arg(0) == "delete" {
+		return runDelete(ctx, output, *address, flags.Args()[1:])
+	}
 	if flags.NArg() != 1 || flags.Arg(0) != "status" {
 		return usageError()
 	}
@@ -70,6 +73,29 @@ func Run(args []string, output io.Writer) error {
 	return nil
 }
 
+func runDelete(ctx context.Context, output io.Writer, address string, args []string) error {
+	if len(args) != 3 {
+		return usageError()
+	}
+	sessionID, err := parseSessionID(args[0])
+	if err != nil {
+		return err
+	}
+	sequence, err := strconv.ParseUint(args[1], 10, 64)
+	if err != nil || sequence == 0 {
+		return fmt.Errorf("sequence must be a positive base-10 integer")
+	}
+	existed, err := client.New(address).Delete(ctx, sessionID, sequence, args[2])
+	if err != nil {
+		return fmt.Errorf("DELETE Key %q: %w", args[2], err)
+	}
+	return json.NewEncoder(output).Encode(struct {
+		Key      string `json:"key"`
+		Sequence uint64 `json:"sequence"`
+		Existed  bool   `json:"existed"`
+	}{Key: args[2], Sequence: sequence, Existed: existed})
+}
+
 func runGet(ctx context.Context, output io.Writer, address string, args []string) error {
 	if len(args) != 1 {
 		return usageError()
@@ -81,7 +107,8 @@ func runGet(ctx context.Context, output io.Writer, address string, args []string
 	return json.NewEncoder(output).Encode(struct {
 		Key   string `json:"key"`
 		Value []byte `json:"value"`
-	}{Key: args[0], Value: value})
+		Found bool   `json:"found"`
+	}{Key: args[0], Value: value, Found: true})
 }
 
 func runSet(ctx context.Context, output io.Writer, address string, args []string) error {
@@ -143,5 +170,5 @@ func parseSessionID(encoded string) ([16]byte, error) {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: quorumkvctl [flags] status | session open | session close <session-id> | set <session-id> <sequence> <key> <value> | get <key>")
+	return fmt.Errorf("usage: quorumkvctl [flags] status | session open | session close <session-id> | set <session-id> <sequence> <key> <value> | get <key> | delete <session-id> <sequence> <key>")
 }

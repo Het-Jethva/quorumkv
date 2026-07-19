@@ -69,6 +69,24 @@ func (c *Client) Set(ctx context.Context, sessionID [16]byte, sequence uint64, k
 	})
 }
 
+// Delete removes key and reports whether a Value existed before the mutation.
+func (c *Client) Delete(ctx context.Context, sessionID [16]byte, sequence uint64, key string) (bool, error) {
+	var existed bool
+	err := c.withLeader(ctx, func(client quorumkvv1.ClientServiceClient) error {
+		response, err := client.Delete(ctx, &quorumkvv1.DeleteRequest{
+			SessionId: sessionID[:],
+			Sequence:  sequence,
+			Key:       key,
+		})
+		if err != nil {
+			return err
+		}
+		existed = response.Existed
+		return nil
+	})
+	return existed, err
+}
+
 // Get returns the latest linearizable Value stored under key.
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	var value []byte

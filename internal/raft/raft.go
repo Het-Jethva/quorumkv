@@ -30,6 +30,7 @@ const (
 	EntryOpenSession
 	EntryCloseSession
 	EntrySet
+	EntryDelete
 )
 
 // SessionID is the replicated identity of one Client Session.
@@ -110,6 +111,16 @@ type ProposeSet struct {
 }
 
 func (ProposeSet) isEvent() {}
+
+// ProposeDelete asks the current Leader to append one DELETE command.
+type ProposeDelete struct {
+	ProposalID ProposalID
+	SessionID  SessionID
+	Sequence   uint64
+	Key        string
+}
+
+func (ProposeDelete) isEvent() {}
 
 // ConfirmRead asks the Leader to prove current authority before a local read.
 type ConfirmRead struct{ ReadID ReadID }
@@ -513,6 +524,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.proposeSession(event)
 	case ProposeSet:
 		return n.proposeSet(event)
+	case ProposeDelete:
+		return n.proposeDelete(event)
 	case ConfirmRead:
 		return n.confirmRead(event)
 	case PreVoteRequest:
@@ -712,6 +725,27 @@ func (n *Node) proposeSet(proposal ProposeSet) []Action {
 		Sequence:  proposal.Sequence,
 		Key:       proposal.Key,
 		Value:     append([]byte(nil), proposal.Value...),
+	}
+	n.appendEntries([]LogEntry{entry})
+	actions := []Action{ProposalAccepted{ProposalID: proposal.ProposalID, Index: entry.Index}}
+	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
+		purpose:   persistLeaderEntry,
+		term:      n.term,
+		lastIndex: entry.Index,
+	})...)
+}
+
+func (n *Node) proposeDelete(proposal ProposeDelete) []Action {
+	if n.role != Leader {
+		return []Action{ProposalRejected{ProposalID: proposal.ProposalID, LeaderID: n.leaderID}}
+	}
+	entry := LogEntry{
+		Index:     n.lastLogIndex + 1,
+		Term:      n.term,
+		Type:      EntryDelete,
+		SessionID: proposal.SessionID,
+		Sequence:  proposal.Sequence,
+		Key:       proposal.Key,
 	}
 	n.appendEntries([]LogEntry{entry})
 	actions := []Action{ProposalAccepted{ProposalID: proposal.ProposalID, Index: entry.Index}}

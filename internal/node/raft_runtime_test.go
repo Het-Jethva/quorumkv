@@ -71,11 +71,12 @@ func TestRaftRuntimeReplaysOnlyDurableCommittedPrefix(t *testing.T) {
 	if err := store.SaveLogEntries([]wal.LogEntry{
 		{Index: 1, Term: 1, Type: wal.EntryType(raft.EntryOpenSession), SessionID: sessionID},
 		{Index: 2, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 1, Key: "committed", Value: []byte("kept")},
-		{Index: 3, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 2, Key: "uncommitted", Value: []byte("ignored")},
+		{Index: 3, Term: 1, Type: wal.EntryType(raft.EntryDelete), SessionID: sessionID, Sequence: 2, Key: "committed"},
+		{Index: 4, Term: 1, Type: wal.EntryType(raft.EntrySet), SessionID: sessionID, Sequence: 3, Key: "uncommitted", Value: []byte("ignored")},
 	}); err != nil {
 		t.Fatalf("save log: %v", err)
 	}
-	if err := store.SaveCommitIndex(2); err != nil {
+	if err := store.SaveCommitIndex(3); err != nil {
 		t.Fatalf("save commit index: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -99,17 +100,17 @@ func TestRaftRuntimeReplaysOnlyDurableCommittedPrefix(t *testing.T) {
 		}
 		machine.apply(apply.Entry)
 	}
-	if got := string(machine.values["committed"]); got != "kept" {
-		t.Fatalf("recovered committed Value = %q, want kept", got)
+	if _, exists := machine.values["committed"]; exists {
+		t.Fatal("recovered committed DELETE left the Key present")
 	}
 	if _, exists := machine.values["uncommitted"]; exists {
 		t.Fatal("uncommitted suffix was applied during recovery")
 	}
-	if result, shouldApply := machine.evaluateSet(raft.SessionID(sessionID), 1); shouldApply || result.failure != sessionSucceeded {
-		t.Fatalf("retry recovered latest sequence = (%v, apply=%v), want cached success without apply", result.failure, shouldApply)
+	if result, shouldApply := machine.evaluateMutation(raft.SessionID(sessionID), 2); shouldApply || result.failure != sessionSucceeded || !result.existed {
+		t.Fatalf("retry recovered DELETE = (%#v, apply=%v), want cached existed=true without apply", result, shouldApply)
 	}
-	if state := runtime.core.State(); state.CommitIndex != 2 || state.LastApplied != 2 || state.LastLogIndex != 3 {
-		t.Fatalf("recovered Raft state = %#v, want applied through 2 with log through 3", state)
+	if state := runtime.core.State(); state.CommitIndex != 3 || state.LastApplied != 3 || state.LastLogIndex != 4 {
+		t.Fatalf("recovered Raft state = %#v, want applied through 3 with log through 4", state)
 	}
 }
 

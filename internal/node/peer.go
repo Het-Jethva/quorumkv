@@ -261,6 +261,8 @@ func encodeEntryType(entryType raft.EntryType) quorumkvv1.RaftEntryType {
 		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_CLOSE_SESSION
 	case raft.EntrySet:
 		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_SET
+	case raft.EntryDelete:
+		return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_DELETE
 	}
 	return quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_UNSPECIFIED
 }
@@ -275,6 +277,8 @@ func decodeEntryType(entryType quorumkvv1.RaftEntryType) (raft.EntryType, error)
 		return raft.EntryCloseSession, nil
 	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_SET:
 		return raft.EntrySet, nil
+	case quorumkvv1.RaftEntryType_RAFT_ENTRY_TYPE_DELETE:
+		return raft.EntryDelete, nil
 	default:
 		return 0, fmt.Errorf("raft entry type %s is unsupported", entryType)
 	}

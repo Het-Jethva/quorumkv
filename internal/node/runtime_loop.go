@@ -103,12 +103,13 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			pendingReads[read.ReadID] = pendingRead{result: readResults, ctx: proposalContext, key: readKey}
 		}
 
-		if set, ok := event.(raft.ProposeSet); ok {
-			if mutation, exists := inFlightMutations[set.SessionID]; exists && mutation.sequence == set.Sequence {
+		mutationSession, mutationSequence, isMutation := proposedMutation(event)
+		if isMutation {
+			if mutation, exists := inFlightMutations[mutationSession]; exists && mutation.sequence == mutationSequence {
 				pending[mutation.index] = append(pending[mutation.index], pendingProposal{result: proposalResults, ctx: proposalContext})
 				continue
 			}
-			if result, shouldPropose := sessions.evaluateSet(set.SessionID, set.Sequence); !shouldPropose {
+			if result, shouldPropose := sessions.evaluateMutation(mutationSession, mutationSequence); !shouldPropose {
 				proposalResults <- result
 				continue
 			}
@@ -138,8 +139,8 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				if proposalResults != nil && proposalContext != nil {
 					pending[action.Index] = append(pending[action.Index], pendingProposal{result: proposalResults, ctx: proposalContext})
 				}
-				if set, ok := event.(raft.ProposeSet); ok {
-					inFlightMutations[set.SessionID] = inFlightMutation{sequence: set.Sequence, index: action.Index}
+				if isMutation {
+					inFlightMutations[mutationSession] = inFlightMutation{sequence: mutationSequence, index: action.Index}
 				}
 			case raft.ProposalRejected:
 				if proposalResults != nil {
@@ -147,7 +148,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				}
 			case raft.ApplyEntry:
 				result := sessions.apply(action.Entry)
-				if action.Entry.Type == raft.EntrySet && inFlightMutations[action.Entry.SessionID].sequence == action.Entry.Sequence {
+				if (action.Entry.Type == raft.EntrySet || action.Entry.Type == raft.EntryDelete) && inFlightMutations[action.Entry.SessionID].sequence == action.Entry.Sequence {
 					delete(inFlightMutations, action.Entry.SessionID)
 				}
 				if proposals, ok := pending[action.Entry.Index]; ok {
@@ -196,6 +197,17 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 			heartbeatC, quorumC = nil, nil
 		}
 		n.publishRaftState(state)
+	}
+}
+
+func proposedMutation(event raft.Event) (raft.SessionID, uint64, bool) {
+	switch event := event.(type) {
+	case raft.ProposeSet:
+		return event.SessionID, event.Sequence, true
+	case raft.ProposeDelete:
+		return event.SessionID, event.Sequence, true
+	default:
+		return raft.SessionID{}, 0, false
 	}
 }
 

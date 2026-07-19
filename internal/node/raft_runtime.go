@@ -25,7 +25,7 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 	}
 	logEntries := make([]raft.LogEntry, len(recovered.Log))
 	for index, entry := range recovered.Log {
-		if entry.Type > wal.EntryType(raft.EntrySet) {
+		if entry.Type > wal.EntryType(raft.EntryDelete) {
 			store.Close()
 			return nil, fmt.Errorf("recover Node %q consensus state: unsupported log entry type %d at index %d", cfg.Node.ID, entry.Type, entry.Index)
 		}
