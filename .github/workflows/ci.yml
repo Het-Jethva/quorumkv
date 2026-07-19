@@ -34,6 +34,30 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  seeded-simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run replayable fault schedules
+        shell: bash
+        run: |
+          mkdir -p .traces
+          go build -o .traces/quorumkvsim ./cmd/quorumkvsim
+          for seed in $(seq 1 50); do
+            .traces/quorumkvsim -seed "$seed" -steps 1000 -trace ".traces/seed-$seed.json"
+          done
+      - name: Store failing simulation traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-traces
+          path: .traces/*.json
+          if-no-files-found: error
+
   static-analysis:
     runs-on: ubuntu-latest
     steps:
