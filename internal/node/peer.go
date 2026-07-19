@@ -117,7 +117,8 @@ func (t *peerTransport) send(ctx context.Context, action raft.Action) error {
 	requestCtx, cancel := context.WithTimeout(ctx, peerRPCTimeout)
 	defer cancel()
 	if _, err := client.client.Send(requestCtx, message); err != nil {
-		t.drop(to)
+		// Keep the channel: gRPC reconnects it in the background. Closing a
+		// failed channel here can stall the single Raft owner during failover.
 		sendErr := fmt.Errorf("send Raft message to Node %q: %w", to, err)
 		if status.Code(err) == codes.FailedPrecondition || status.Code(err) == codes.InvalidArgument {
 			return peerConfigurationError{err: sendErr}
@@ -148,7 +149,6 @@ func (t *peerTransport) sendSnapshot(ctx context.Context, action raft.SendInstal
 	defer cancel()
 	_, err = client.client.Send(requestCtx, &quorumkvv1.SendRequest{ProtocolVersion: peerProtocolVersion, ClusterId: t.config.ClusterID, FromNodeId: t.config.Node.ID, ToNodeId: string(action.To), Message: &quorumkvv1.SendRequest_InstallSnapshotRequest{InstallSnapshotRequest: &quorumkvv1.InstallSnapshotRequest{Term: action.Term, RequestId: action.RequestID, SnapshotIndex: action.SnapshotIndex, SnapshotTerm: action.SnapshotTerm, SnapshotLength: uint64(len(contents)), SnapshotChecksum: crc32.ChecksumIEEE(contents), Offset: action.Offset, Data: append([]byte(nil), contents[action.Offset:end]...), Done: end == uint64(len(contents))}}})
 	if err != nil {
-		t.drop(action.To)
 		return fmt.Errorf("send snapshot chunk to Node %q: %w", action.To, err)
 	}
 	return nil
@@ -191,13 +191,6 @@ func (t *peerTransport) client(ctx context.Context, id raft.NodeID) (*peerClient
 	peer := &peerClient{connection: connection, client: client}
 	t.clients[id] = peer
 	return peer, nil
-}
-
-func (t *peerTransport) drop(id raft.NodeID) {
-	if client := t.clients[id]; client != nil {
-		client.connection.Close()
-		delete(t.clients, id)
-	}
 }
 
 func (t *peerTransport) close() error {
