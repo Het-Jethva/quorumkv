@@ -13,10 +13,11 @@ import (
 
 // Config contains the static identity and local settings for one node.
 type Config struct {
-	Version   int               `yaml:"version"`
-	ClusterID string            `yaml:"cluster_id"`
-	Node      Node              `yaml:"node"`
-	Members   map[string]Member `yaml:"members"`
+	Version            int               `yaml:"version"`
+	ClusterID          string            `yaml:"cluster_id"`
+	ActiveSessionLimit int               `yaml:"active_session_limit"`
+	Node               Node              `yaml:"node"`
+	Members            map[string]Member `yaml:"members"`
 }
 
 // Node contains settings owned by this process.
@@ -62,6 +63,11 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.ClusterID) == "" {
 		problems = append(problems, errors.New("cluster_id is required"))
+	}
+	if c.ActiveSessionLimit < 1 {
+		problems = append(problems, errors.New("active_session_limit must be at least 1"))
+	} else if uint64(c.ActiveSessionLimit) > uint64(^uint32(0)) {
+		problems = append(problems, errors.New("active_session_limit exceeds the v1 protocol limit"))
 	}
 	if strings.TrimSpace(c.Node.ID) == "" {
 		problems = append(problems, errors.New("node.id is required"))

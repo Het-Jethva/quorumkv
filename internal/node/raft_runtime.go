@@ -25,11 +25,11 @@ func openRaftRuntime(cfg config.Config, peers []raft.NodeID) (*raftRuntime, erro
 	}
 	logEntries := make([]raft.LogEntry, len(recovered.Log))
 	for index, entry := range recovered.Log {
-		if entry.Type != wal.EntryType(raft.EntryNoOp) {
+		if entry.Type > wal.EntryType(raft.EntryCloseSession) {
 			store.Close()
 			return nil, fmt.Errorf("recover Node %q consensus state: unsupported log entry type %d at index %d", cfg.Node.ID, entry.Type, entry.Index)
 		}
-		logEntries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: raft.EntryType(entry.Type)}
+		logEntries[index] = raft.LogEntry{Index: entry.Index, Term: entry.Term, Type: raft.EntryType(entry.Type), SessionID: raft.SessionID(entry.SessionID)}
 	}
 	core := raft.NewNodeWithLog(raft.NodeID(cfg.Node.ID), peers, raft.HardState{
 		Term:     recovered.HardState.Term,
@@ -60,7 +60,7 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 		case raft.PersistLogEntries:
 			entries := make([]wal.LogEntry, len(persist.Entries))
 			for index, entry := range persist.Entries {
-				entries[index] = wal.LogEntry{Index: entry.Index, Term: entry.Term, Type: wal.EntryType(entry.Type)}
+				entries[index] = wal.LogEntry{Index: entry.Index, Term: entry.Term, Type: wal.EntryType(entry.Type), SessionID: [16]byte(entry.SessionID)}
 			}
 			if err := r.wal.SaveLogEntries(entries); err != nil {
 				return nil, fmt.Errorf("persist Raft log entries: %w", err)

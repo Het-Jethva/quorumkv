@@ -11,8 +11,12 @@ go run ./cmd/quorumkv -config node-1.yaml
 go run ./cmd/quorumkv -config node-2.yaml
 go run ./cmd/quorumkv -config node-3.yaml
 go run ./cmd/quorumkvctl -address 127.0.0.1:7401 status
+go run ./cmd/quorumkvctl -address 127.0.0.1:7401 session open
+go run ./cmd/quorumkvctl -address 127.0.0.1:7401 session close <32-hex-character-session-id>
 ```
 
-The client endpoint implements the versioned `quorumkv.v1.NodeService` status API and standard `grpc.health.v1.Health` checks. Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available. Peer handshakes fail closed on protocol, Cluster Identity, or Node Identity mismatches.
+The client endpoint implements the versioned `quorumkv.v1.NodeService` status API, explicit Client Session open and close commands, and standard `grpc.health.v1.Health` checks. A Follower returns a typed Leader hint, which `quorumkvctl` follows directly within its deadline. Session creation is committed through Raft before its random 128-bit identity is returned, and `active_session_limit` bounds replicated active-session state.
+
+Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available. Peer handshakes fail closed on protocol, Cluster Identity, or Node Identity mismatches.
 
 The Node stops gracefully when its context is canceled or it receives `SIGINT`/`SIGTERM`.

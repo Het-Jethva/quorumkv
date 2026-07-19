@@ -12,8 +12,9 @@ import (
 
 func TestHandshakeRejectsIncompatiblePeerIdentity(t *testing.T) {
 	n := New(config.Config{
-		ClusterID: "cluster-1",
-		Node:      config.Node{ID: "node-1"},
+		ClusterID:          "cluster-1",
+		ActiveSessionLimit: 10,
+		Node:               config.Node{ID: "node-1"},
 		Members: map[string]config.Member{
 			"node-1": {},
 			"node-2": {},
@@ -21,7 +22,7 @@ func TestHandshakeRejectsIncompatiblePeerIdentity(t *testing.T) {
 		},
 	})
 	valid := func() *quorumkvv1.HandshakeRequest {
-		return &quorumkvv1.HandshakeRequest{ProtocolVersion: peerProtocolVersion, ClusterId: "cluster-1", NodeId: "node-2", TargetNodeId: "node-1"}
+		return &quorumkvv1.HandshakeRequest{ProtocolVersion: peerProtocolVersion, ClusterId: "cluster-1", NodeId: "node-2", TargetNodeId: "node-1", ActiveSessionLimit: 10}
 	}
 
 	tests := []struct {
@@ -33,6 +34,7 @@ func TestHandshakeRejectsIncompatiblePeerIdentity(t *testing.T) {
 		{name: "Cluster Identity", change: func(request *quorumkvv1.HandshakeRequest) { request.ClusterId = "other-cluster" }, detail: "does not match"},
 		{name: "unknown Node Identity", change: func(request *quorumkvv1.HandshakeRequest) { request.NodeId = "node-4" }, detail: "not a configured Cluster member"},
 		{name: "target Node Identity", change: func(request *quorumkvv1.HandshakeRequest) { request.TargetNodeId = "node-3" }, detail: "targeted Node"},
+		{name: "active Client Session limit", change: func(request *quorumkvv1.HandshakeRequest) { request.ActiveSessionLimit++ }, detail: "does not match"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

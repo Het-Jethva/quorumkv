@@ -29,16 +29,33 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 	}()
 
 	n.publishRaftState(runtime.core.State())
+	sessions := newSessionMachine(n.config.ActiveSessionLimit)
+	type pendingProposal struct {
+		result chan proposalResult
+		ctx    context.Context
+	}
+	pending := make(map[uint64]pendingProposal)
 	for {
+		for index, proposal := range pending {
+			if proposal.ctx.Err() != nil {
+				delete(pending, index)
+			}
+		}
 		var event raft.Event
+		var proposalResults chan proposalResult
+		var proposalContext context.Context
 		select {
 		case <-ctx.Done():
 			return nil
 		case input := <-n.events:
 			// Acceptance means the single owner has dequeued the event; the peer
 			// never receives success for work stranded during shutdown.
-			close(input.accepted)
+			if input.accepted != nil {
+				close(input.accepted)
+			}
 			event = input.event
+			proposalResults = input.result
+			proposalContext = input.requestContext
 		case <-electionTimer.C:
 			event = raft.ElectionTimeout{}
 		case <-heartbeatC:
@@ -66,7 +83,21 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				heartbeatTimer, heartbeatC = resetOptionalTimer(heartbeatTimer, heartbeatInterval)
 			case raft.ResetCheckQuorumTimer:
 				quorumTimer, quorumC = resetOptionalTimer(quorumTimer, checkQuorumWindow)
-			case raft.ApplyEntry, raft.BecameLeader, raft.BecameReadReady, raft.LostLeadership:
+			case raft.ProposalAccepted:
+				if proposalResults != nil && proposalContext != nil {
+					pending[action.Index] = pendingProposal{result: proposalResults, ctx: proposalContext}
+				}
+			case raft.ProposalRejected:
+				if proposalResults != nil {
+					proposalResults <- proposalResult{leaderID: action.LeaderID, rejected: true}
+				}
+			case raft.ApplyEntry:
+				result := sessions.apply(action.Entry)
+				if proposal, ok := pending[action.Entry.Index]; ok {
+					proposal.result <- result
+					delete(pending, action.Entry.Index)
+				}
+			case raft.BecameLeader, raft.BecameReadReady, raft.LostLeadership:
 				// Role and progress are read from the core after all actions finish.
 			}
 		}

@@ -60,7 +60,11 @@ func TestWALSyncsAndValidatesLogEntryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open WAL: %v", err)
 	}
-	if err := wal.SaveLogEntries([]LogEntry{{Index: 1, Term: 1, Type: 0}}); err != nil {
+	sessionID := [16]byte{1, 2, 3, 4}
+	if err := wal.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1, Type: 0},
+		{Index: 2, Term: 1, Type: 1, SessionID: sessionID},
+	}); err != nil {
 		t.Fatalf("save log entry: %v", err)
 	}
 	if err := wal.Close(); err != nil {
@@ -72,7 +76,10 @@ func TestWALSyncsAndValidatesLogEntryOrder(t *testing.T) {
 		t.Fatalf("reopen WAL: %v", err)
 	}
 	defer reopened.Close()
-	wantLog := []LogEntry{{Index: 1, Term: 1, Type: 0}}
+	wantLog := []LogEntry{
+		{Index: 1, Term: 1, Type: 0},
+		{Index: 2, Term: 1, Type: 1, SessionID: sessionID},
+	}
 	if !reflect.DeepEqual(recovered.Log, wantLog) {
 		t.Fatalf("recovered log = %#v, want %#v", recovered.Log, wantLog)
 	}

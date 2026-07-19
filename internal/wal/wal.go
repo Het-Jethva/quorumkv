@@ -30,7 +30,8 @@ const (
 	recordClusterIdentity recordType = 1
 	recordNodeIdentity    recordType = 2
 	recordHardState       recordType = 3
-	recordLogEntries      recordType = 4
+	recordLogEntries      recordType = 4 // Legacy no-op-only entries.
+	recordLogEntriesV2    recordType = 5
 )
 
 // Identity binds durable state to one Node in one Cluster.
@@ -50,9 +51,10 @@ type EntryType uint8
 
 // LogEntry is the durable representation of one Raft log position.
 type LogEntry struct {
-	Index uint64
-	Term  uint64
-	Type  EntryType
+	Index     uint64
+	Term      uint64
+	Type      EntryType
+	SessionID [16]byte
 }
 
 // RecoveredState is the latest valid state reconstructed from all WAL segments.
@@ -72,14 +74,15 @@ func (w *WAL) SaveLogEntries(entries []LogEntry) error {
 	if len(entries) == 0 {
 		return errors.New("save log entries: at least one entry is required")
 	}
-	payload := make([]byte, len(entries)*17)
+	payload := make([]byte, len(entries)*33)
 	for index, entry := range entries {
-		offset := index * 17
+		offset := index * 33
 		binary.BigEndian.PutUint64(payload[offset:offset+8], entry.Index)
 		binary.BigEndian.PutUint64(payload[offset+8:offset+16], entry.Term)
 		payload[offset+16] = byte(entry.Type)
+		copy(payload[offset+17:offset+33], entry.SessionID[:])
 	}
-	if err := w.appendRecord(recordLogEntries, payload); err != nil {
+	if err := w.appendRecord(recordLogEntriesV2, payload); err != nil {
 		return fmt.Errorf("append %d log entries: %w", len(entries), err)
 	}
 	if err := w.file.Sync(); err != nil {
@@ -384,6 +387,23 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 				Term:  binary.BigEndian.Uint64(payload[offset+8 : offset+16]),
 				Type:  EntryType(payload[offset+16]),
 			}
+			lastIndex := uint64(len(state.Log))
+			if entry.Index != lastIndex+1 {
+				return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
+			}
+			state.Log = append(state.Log, entry)
+		}
+	case recordLogEntriesV2:
+		if len(payload) == 0 || len(payload)%33 != 0 {
+			return fmt.Errorf("session log-entry record length %d is invalid", len(payload))
+		}
+		for offset := 0; offset < len(payload); offset += 33 {
+			entry := LogEntry{
+				Index: binary.BigEndian.Uint64(payload[offset : offset+8]),
+				Term:  binary.BigEndian.Uint64(payload[offset+8 : offset+16]),
+				Type:  EntryType(payload[offset+16]),
+			}
+			copy(entry.SessionID[:], payload[offset+17:offset+33])
 			lastIndex := uint64(len(state.Log))
 			if entry.Index != lastIndex+1 {
 				return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)

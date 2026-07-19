@@ -106,6 +106,55 @@ func TestElectedLeaderCommitsNoOpBeforeReportingReadReady(t *testing.T) {
 	}
 }
 
+func TestClientSessionCommandCommitsAfterLeaderChange(t *testing.T) {
+	cluster := newCluster(t, 42)
+	oldLeader := electLeader(t, cluster)
+	sessionID := raft.SessionID{1, 2, 3}
+	if err := cluster.ProposeSession(oldLeader, raft.ProposeSession{ProposalID: 1, Type: raft.EntryOpenSession, SessionID: sessionID}); err != nil {
+		t.Fatalf("propose open Client Session: %v", err)
+	}
+	if err := cluster.ProposeSession(oldLeader, raft.ProposeSession{ProposalID: 2, Type: raft.EntryOpenSession, SessionID: raft.SessionID{9}}); err != nil {
+		t.Fatalf("propose second open Client Session: %v", err)
+	}
+
+	var majority []raft.NodeID
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if id != oldLeader {
+			majority = append(majority, id)
+		}
+	}
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("start fresh check-quorum window: %v", err)
+	}
+	cluster.Partition(majority, []raft.NodeID{oldLeader})
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("demote isolated Leader: %v", err)
+	}
+	for _, id := range majority {
+		if err := cluster.FireElectionTimeout(id); err != nil {
+			t.Fatalf("fire election timeout for %s: %v", id, err)
+		}
+	}
+	var newLeader raft.NodeID
+	for _, id := range majority {
+		if cluster.State(id).Role == raft.Leader {
+			newLeader = id
+		}
+	}
+	if newLeader == "" {
+		t.Fatal("surviving Quorum elected no replacement Leader")
+	}
+	if err := cluster.ProposeSession(newLeader, raft.ProposeSession{ProposalID: 3, Type: raft.EntryCloseSession, SessionID: sessionID}); err != nil {
+		t.Fatalf("propose close Client Session: %v", err)
+	}
+	for _, id := range majority {
+		applied := cluster.AppliedEntries(id)
+		if got := applied[len(applied)-1]; got.Type != raft.EntryCloseSession || got.SessionID != sessionID {
+			t.Fatalf("Node %s last applied entry = %#v, want close for %#v", id, got, sessionID)
+		}
+	}
+}
+
 func TestFixedSeedReproducesEventAndActionSequence(t *testing.T) {
 	first, err := simulation.RunElection(8675309)
 	if err != nil {

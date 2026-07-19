@@ -16,6 +16,7 @@ func TestLoadValidConfig(t *testing.T) {
 	path := filepath.Join(directory, "node.yaml")
 	contents := `version: 1
 cluster_id: test-cluster
+active_session_limit: 64
 node:
   id: node-1
   data_dir: data/node-1
@@ -80,7 +81,7 @@ func TestValidateReportsAllInvalidSettings(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate() error = nil, want validation errors")
 	}
-	for _, detail := range []string{"version", "cluster_id", "node.id", "node.data_dir", "exactly three Nodes"} {
+	for _, detail := range []string{"version", "cluster_id", "active_session_limit", "node.id", "node.data_dir", "exactly three Nodes"} {
 		if !strings.Contains(err.Error(), detail) {
 			t.Errorf("Validate() error = %q, want %q", err, detail)
 		}
@@ -101,9 +102,10 @@ func TestValidateRejectsDuplicateMemberAddresses(t *testing.T) {
 
 func configForTest() config.Config {
 	return config.Config{
-		Version:   1,
-		ClusterID: "cluster-1",
-		Node:      config.Node{ID: "node-1", DataDir: "data/node-1"},
+		Version:            1,
+		ClusterID:          "cluster-1",
+		ActiveSessionLimit: 64,
+		Node:               config.Node{ID: "node-1", DataDir: "data/node-1"},
 		Members: map[string]config.Member{
 			"node-1": {PeerAddress: "127.0.0.1:7301", ClientAddress: "127.0.0.1:7401"},
 			"node-2": {PeerAddress: "127.0.0.1:7302", ClientAddress: "127.0.0.1:7402"},

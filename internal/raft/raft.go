@@ -27,13 +27,23 @@ type EntryType uint8
 
 const (
 	EntryNoOp EntryType = iota
+	EntryOpenSession
+	EntryCloseSession
 )
+
+// SessionID is the replicated identity of one Client Session.
+type SessionID [16]byte
+
+// ProposalID correlates a local request with the replicated entry it created.
+// It is runtime metadata and is never stored in the log or sent to peers.
+type ProposalID uint64
 
 // LogEntry is one position in the replicated Raft log.
 type LogEntry struct {
-	Index uint64
-	Term  uint64
-	Type  EntryType
+	Index     uint64
+	Term      uint64
+	Type      EntryType
+	SessionID SessionID
 }
 
 // ElectionTimeout reports that the runtime's election timer fired.
@@ -60,6 +70,15 @@ func (HardStatePersisted) isEvent() {}
 type LogEntriesPersisted struct{ PersistenceID uint64 }
 
 func (LogEntriesPersisted) isEvent() {}
+
+// ProposeSession asks the current Leader to append one session command.
+type ProposeSession struct {
+	ProposalID ProposalID
+	Type       EntryType
+	SessionID  SessionID
+}
+
+func (ProposeSession) isEvent() {}
 
 // PreVoteRequest checks whether an election for Term would be viable without
 // changing any Node's current Term or durable vote.
@@ -225,6 +244,22 @@ type BecameReadReady struct{ Term uint64 }
 
 func (BecameReadReady) isAction() {}
 
+// ProposalAccepted binds a local proposal to its replicated log position.
+type ProposalAccepted struct {
+	ProposalID ProposalID
+	Index      uint64
+}
+
+func (ProposalAccepted) isAction() {}
+
+// ProposalRejected reports that this Node is not the Leader.
+type ProposalRejected struct {
+	ProposalID ProposalID
+	LeaderID   NodeID
+}
+
+func (ProposalRejected) isAction() {}
+
 // State is a read-only snapshot used by runtimes and deterministic assertions.
 type State struct {
 	ID           NodeID
@@ -254,7 +289,7 @@ type pendingPersistence struct {
 type logPersistencePurpose uint8
 
 const (
-	persistLeaderNoOp logPersistencePurpose = iota
+	persistLeaderEntry logPersistencePurpose = iota
 	persistFollowerAppend
 )
 
@@ -369,6 +404,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.hardStatePersisted(event)
 	case LogEntriesPersisted:
 		return n.logEntriesPersisted(event)
+	case ProposeSession:
+		return n.proposeSession(event)
 	case PreVoteRequest:
 		return n.handlePreVoteRequest(event)
 	case PreVoteResponse:
@@ -467,7 +504,7 @@ func (n *Node) logEntriesPersisted(event LogEntriesPersisted) []Action {
 	}
 
 	switch pending.purpose {
-	case persistLeaderNoOp:
+	case persistLeaderEntry:
 		if n.role != Leader || n.term != pending.term || n.lastLogIndex < pending.lastIndex {
 			return nil
 		}
@@ -524,7 +561,29 @@ func (n *Node) handleVoteResponse(response VoteResponse) []Action {
 	n.appendEntries([]LogEntry{entry})
 	actions := []Action{BecameLeader{Term: n.term}, ResetHeartbeatTimer{}, ResetCheckQuorumTimer{}}
 	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
-		purpose:   persistLeaderNoOp,
+		purpose:   persistLeaderEntry,
+		term:      n.term,
+		lastIndex: entry.Index,
+	})...)
+}
+
+func (n *Node) proposeSession(proposal ProposeSession) []Action {
+	if n.role != Leader {
+		return []Action{ProposalRejected{ProposalID: proposal.ProposalID, LeaderID: n.leaderID}}
+	}
+	if proposal.Type != EntryOpenSession && proposal.Type != EntryCloseSession {
+		return nil
+	}
+	entry := LogEntry{
+		Index:     n.lastLogIndex + 1,
+		Term:      n.term,
+		Type:      proposal.Type,
+		SessionID: proposal.SessionID,
+	}
+	n.appendEntries([]LogEntry{entry})
+	actions := []Action{ProposalAccepted{ProposalID: proposal.ProposalID, Index: entry.Index}}
+	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
+		purpose:   persistLeaderEntry,
 		term:      n.term,
 		lastIndex: entry.Index,
 	})...)

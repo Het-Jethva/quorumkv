@@ -30,18 +30,22 @@ const (
 // Run must be called at most once.
 type Node struct {
 	quorumkvv1.UnimplementedNodeServiceServer
+	quorumkvv1.UnimplementedClientServiceServer
 	quorumkvv1.UnimplementedPeerServiceServer
 
-	config      config.Config
-	ready       atomic.Bool
-	raftState   atomic.Value
-	events      chan raftInput
-	runtimeDone chan struct{}
+	config       config.Config
+	ready        atomic.Bool
+	raftState    atomic.Value
+	events       chan raftInput
+	runtimeDone  chan struct{}
+	nextProposal atomic.Uint64
 }
 
 type raftInput struct {
-	event    raft.Event
-	accepted chan struct{}
+	event          raft.Event
+	accepted       chan struct{}
+	result         chan proposalResult
+	requestContext context.Context
 }
 
 // New creates a node from an already validated configuration.
@@ -94,6 +98,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	healthServer.SetServingStatus(ReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	grpc_health_v1.RegisterHealthServer(clientServer, healthServer)
 	quorumkvv1.RegisterNodeServiceServer(clientServer, n)
+	quorumkvv1.RegisterClientServiceServer(clientServer, n)
 	quorumkvv1.RegisterPeerServiceServer(peerServer, n)
 
 	runCtx, cancel := context.WithCancel(ctx)
