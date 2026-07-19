@@ -24,6 +24,37 @@ func TestProcessRestartDoesNotGrantSecondVoteInTerm(t *testing.T) {
 	}
 }
 
+func TestRaftRuntimeRestoresPersistedLog(t *testing.T) {
+	cfg := config.Config{ClusterID: "cluster-1", Node: config.Node{ID: "node-1", DataDir: t.TempDir()}}
+	peers := []raft.NodeID{"node-2", "node-3"}
+	runtime, err := openRaftRuntime(cfg, peers)
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	if _, err := runtime.step(raft.ElectionTimeout{}); err != nil {
+		t.Fatalf("start pre-vote: %v", err)
+	}
+	if _, err := runtime.step(raft.PreVoteResponse{From: "node-2", Term: 1, CurrentTerm: 0, Granted: true}); err != nil {
+		t.Fatalf("win pre-vote: %v", err)
+	}
+	if _, err := runtime.step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true}); err != nil {
+		t.Fatalf("win election: %v", err)
+	}
+	if err := runtime.close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+
+	reopened, err := openRaftRuntime(cfg, peers)
+	if err != nil {
+		t.Fatalf("reopen runtime: %v", err)
+	}
+	defer reopened.close()
+	state := reopened.core.State()
+	if state.LastLogIndex != 1 || state.LastLogTerm != 1 {
+		t.Fatalf("recovered log state = %#v, want index 1 in Term 1", state)
+	}
+}
+
 func runVoteProcess(t *testing.T, directory, candidate string) string {
 	t.Helper()
 	executable, err := os.Executable()

@@ -30,6 +30,7 @@ const (
 	recordClusterIdentity recordType = 1
 	recordNodeIdentity    recordType = 2
 	recordHardState       recordType = 3
+	recordLogEntries      recordType = 4
 )
 
 // Identity binds durable state to one Node in one Cluster.
@@ -44,10 +45,47 @@ type HardState struct {
 	VotedFor string
 }
 
+// EntryType identifies the command stored in a durable log entry.
+type EntryType uint8
+
+// LogEntry is the durable representation of one Raft log position.
+type LogEntry struct {
+	Index uint64
+	Term  uint64
+	Type  EntryType
+}
+
 // RecoveredState is the latest valid state reconstructed from all WAL segments.
 type RecoveredState struct {
 	Identity  Identity
 	HardState HardState
+	Log       []LogEntry
+}
+
+// SaveLogEntries appends ordered entries and returns only after they are synced.
+func (w *WAL) SaveLogEntries(entries []LogEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("save log entries: WAL is closed")
+	}
+	if len(entries) == 0 {
+		return errors.New("save log entries: at least one entry is required")
+	}
+	payload := make([]byte, len(entries)*17)
+	for index, entry := range entries {
+		offset := index * 17
+		binary.BigEndian.PutUint64(payload[offset:offset+8], entry.Index)
+		binary.BigEndian.PutUint64(payload[offset+8:offset+16], entry.Term)
+		payload[offset+16] = byte(entry.Type)
+	}
+	if err := w.appendRecord(recordLogEntries, payload); err != nil {
+		return fmt.Errorf("append %d log entries: %w", len(entries), err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync %d log entries: %w", len(entries), err)
+	}
+	return nil
 }
 
 // WAL is an ordered, synced sequence of consensus records. A WAL must not be
@@ -336,6 +374,22 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			return fmt.Errorf("hard-state Term decreased from %d to %d", state.HardState.Term, term)
 		}
 		state.HardState = HardState{Term: term, VotedFor: string(payload[8:])}
+	case recordLogEntries:
+		if len(payload) == 0 || len(payload)%17 != 0 {
+			return fmt.Errorf("log-entry record length %d is invalid", len(payload))
+		}
+		for offset := 0; offset < len(payload); offset += 17 {
+			entry := LogEntry{
+				Index: binary.BigEndian.Uint64(payload[offset : offset+8]),
+				Term:  binary.BigEndian.Uint64(payload[offset+8 : offset+16]),
+				Type:  EntryType(payload[offset+16]),
+			}
+			lastIndex := uint64(len(state.Log))
+			if entry.Index != lastIndex+1 {
+				return fmt.Errorf("log entry index %d follows index %d", entry.Index, lastIndex)
+			}
+			state.Log = append(state.Log, entry)
+		}
 	default:
 		return fmt.Errorf("unknown record type %d", kind)
 	}

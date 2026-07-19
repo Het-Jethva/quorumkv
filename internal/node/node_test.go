@@ -2,6 +2,7 @@ package node_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -27,11 +28,10 @@ func TestNodeReportsStatusAndHealthThenStops(t *testing.T) {
 		Version:   1,
 		ClusterID: "test-cluster",
 		Node: config.Node{
-			ID:            "node-1",
-			PeerAddress:   peerAddress,
-			ClientAddress: clientAddress,
-			DataDir:       t.TempDir(),
+			ID:      "node-1",
+			DataDir: t.TempDir(),
 		},
+		Members: testMembers(peerAddress, clientAddress),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -94,11 +94,10 @@ func TestNodeStartupRejectsConflictingDurableIdentity(t *testing.T) {
 		Version:   1,
 		ClusterID: "cluster-1",
 		Node: config.Node{
-			ID:            "node-1",
-			PeerAddress:   unusedAddress(t),
-			ClientAddress: unusedAddress(t),
-			DataDir:       directory,
+			ID:      "node-1",
+			DataDir: directory,
 		},
+		Members: testMembers(unusedAddress(t), unusedAddress(t)),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -111,6 +110,50 @@ func TestNodeStartupRejectsConflictingDurableIdentity(t *testing.T) {
 	err := node.New(conflict).Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "durable identity mismatch") {
 		t.Fatalf("Run() error = %v, want durable identity mismatch", err)
+	}
+}
+
+func TestNodeStopsOnPeerClusterMismatchWithDiagnostic(t *testing.T) {
+	members := map[string]config.Member{
+		"node-1": {PeerAddress: unusedAddress(t), ClientAddress: unusedAddress(t)},
+		"node-2": {PeerAddress: unusedAddress(t), ClientAddress: unusedAddress(t)},
+		"node-3": {PeerAddress: unusedAddress(t), ClientAddress: unusedAddress(t)},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan error, 2)
+	for index, clusterID := range []string{"cluster-1", "cluster-2"} {
+		id := fmt.Sprintf("node-%d", index+1)
+		cfg := config.Config{
+			Version:   1,
+			ClusterID: clusterID,
+			Node:      config.Node{ID: id, DataDir: t.TempDir()},
+			Members:   members,
+		}
+		go func() { results <- node.New(cfg).Run(ctx) }()
+	}
+
+	select {
+	case err := <-results:
+		if err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("Run() error = %v, want actionable Cluster Identity mismatch", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Nodes did not fail after incompatible peer handshake")
+	}
+	cancel()
+	select {
+	case <-results:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Node did not stop after cancellation")
+	}
+}
+
+func testMembers(peerAddress, clientAddress string) map[string]config.Member {
+	return map[string]config.Member{
+		"node-1": {PeerAddress: peerAddress, ClientAddress: clientAddress},
+		"node-2": {PeerAddress: "127.0.0.1:17302", ClientAddress: "127.0.0.1:17402"},
+		"node-3": {PeerAddress: "127.0.0.1:17303", ClientAddress: "127.0.0.1:17403"},
 	}
 }
 

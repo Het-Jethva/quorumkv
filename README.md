@@ -1,14 +1,18 @@
 # QuorumKV
 
-QuorumKV is an in-progress three-node distributed key-value database built in Go. It can boot one observable Node and includes a deterministic event-to-action Raft core that elects a Leader and establishes read readiness by durably replicating, committing, and applying a current-Term no-op without networking, disk I/O, or clocks inside the core.
+QuorumKV is an in-progress three-node distributed key-value database built in Go. Three independent Node processes use peer gRPC to elect a Leader, replace it after process loss, and expose each Node's locally observed role, Leader, and Term. The deterministic Raft core remains free of networking, disk I/O, and clocks.
 
-## Run one Node
+## Run a local Cluster
+
+Copy `quorumkv.example.yaml` three times. Keep the shared `cluster_id` and `members` map identical, and set each file's `node.id` and `node.data_dir` to its corresponding Node. Then start all three processes:
 
 ```sh
-go run ./cmd/quorumkv -config quorumkv.example.yaml
-go run ./cmd/quorumkvctl -address 127.0.0.1:7400 status
+go run ./cmd/quorumkv -config node-1.yaml
+go run ./cmd/quorumkv -config node-2.yaml
+go run ./cmd/quorumkv -config node-3.yaml
+go run ./cmd/quorumkvctl -address 127.0.0.1:7401 status
 ```
 
-The client endpoint implements the versioned `quorumkv.v1.NodeService` status API and standard `grpc.health.v1.Health` checks. Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available.
+The client endpoint implements the versioned `quorumkv.v1.NodeService` status API and standard `grpc.health.v1.Health` checks. Check `quorumkv.v1.Liveness` for local process health and `quorumkv.v1.Readiness` for local RPC readiness. Readiness does not claim that a Cluster quorum is available. Peer handshakes fail closed on protocol, Cluster Identity, or Node Identity mismatches.
 
 The Node stops gracefully when its context is canceled or it receives `SIGINT`/`SIGTERM`.

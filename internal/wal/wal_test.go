@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestWALRecoversLatestHardStateAcrossSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open new WAL: %v", err)
 	}
-	if recovered != (RecoveredState{Identity: identity}) {
+	if !reflect.DeepEqual(recovered, RecoveredState{Identity: identity}) {
 		t.Fatalf("new WAL state = %#v, want identity only", recovered)
 	}
 	for _, state := range []HardState{
@@ -47,8 +48,36 @@ func TestWALRecoversLatestHardStateAcrossSegments(t *testing.T) {
 	}
 	defer reopened.Close()
 	want := RecoveredState{Identity: identity, HardState: HardState{Term: 3, VotedFor: "node-3"}}
-	if recovered != want {
+	if !reflect.DeepEqual(recovered, want) {
 		t.Fatalf("recovered state = %#v, want %#v", recovered, want)
+	}
+}
+
+func TestWALSyncsAndValidatesLogEntryOrder(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	wal, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := wal.SaveLogEntries([]LogEntry{{Index: 1, Term: 1, Type: 0}}); err != nil {
+		t.Fatalf("save log entry: %v", err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	defer reopened.Close()
+	wantLog := []LogEntry{{Index: 1, Term: 1, Type: 0}}
+	if !reflect.DeepEqual(recovered.Log, wantLog) {
+		t.Fatalf("recovered log = %#v, want %#v", recovered.Log, wantLog)
+	}
+	if err := reopened.SaveLogEntries(nil); err == nil || !strings.Contains(err.Error(), "at least one entry") {
+		t.Fatalf("SaveLogEntries(nil) error = %v, want non-empty detail", err)
 	}
 }
 
