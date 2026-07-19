@@ -239,6 +239,12 @@ type State struct {
 	ReadReady    bool
 }
 
+// HardState is the election state restored before a Node processes events.
+type HardState struct {
+	Term     uint64
+	VotedFor NodeID
+}
+
 type pendingPersistence struct {
 	term     uint64
 	votedFor NodeID
@@ -292,20 +298,32 @@ type Node struct {
 	pendingLog         map[uint64]pendingLogPersistence
 }
 
-// NewNode creates a Follower with an empty log. Peers must exclude id.
+// NewNode creates a Follower with an empty log and no durable election state.
+// Peers must exclude id.
 func NewNode(id NodeID, peers []NodeID) *Node {
+	return NewNodeWithHardState(id, peers, HardState{})
+}
+
+// NewNodeWithHardState creates a Follower from state recovered by the runtime.
+// Recovered state is durable by definition, so a vote cannot be granted again
+// in the same Term after restart.
+func NewNodeWithHardState(id NodeID, peers []NodeID, hardState HardState) *Node {
 	orderedPeers := append([]NodeID(nil), peers...)
 	sort.Slice(orderedPeers, func(i, j int) bool { return orderedPeers[i] < orderedPeers[j] })
 	return &Node{
-		id:          id,
-		peers:       orderedPeers,
-		role:        Follower,
-		votes:       make(map[NodeID]struct{}),
-		preVotes:    make(map[NodeID]struct{}),
-		activePeers: make(map[NodeID]struct{}),
-		matchIndex:  make(map[NodeID]uint64),
-		pending:     make(map[uint64]pendingPersistence),
-		pendingLog:  make(map[uint64]pendingLogPersistence),
+		id:              id,
+		peers:           orderedPeers,
+		role:            Follower,
+		term:            hardState.Term,
+		votedFor:        hardState.VotedFor,
+		durableTerm:     hardState.Term,
+		durableVotedFor: hardState.VotedFor,
+		votes:           make(map[NodeID]struct{}),
+		preVotes:        make(map[NodeID]struct{}),
+		activePeers:     make(map[NodeID]struct{}),
+		matchIndex:      make(map[NodeID]uint64),
+		pending:         make(map[uint64]pendingPersistence),
+		pendingLog:      make(map[uint64]pendingLogPersistence),
 	}
 }
 

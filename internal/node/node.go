@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,10 +40,16 @@ func New(cfg config.Config) *Node {
 }
 
 // Run serves the peer and client endpoints until cancellation or a server error.
-func (n *Node) Run(ctx context.Context) error {
-	if err := os.MkdirAll(n.config.Node.DataDir, 0o750); err != nil {
-		return fmt.Errorf("create data directory %q: %w", n.config.Node.DataDir, err)
+func (n *Node) Run(ctx context.Context) (runErr error) {
+	runtime, err := openRaftRuntime(n.config, nil)
+	if err != nil {
+		return err
 	}
+	defer func() {
+		if err := runtime.close(); err != nil && runErr == nil {
+			runErr = fmt.Errorf("close Node %q consensus state: %w", n.config.Node.ID, err)
+		}
+	}()
 
 	peerListener, err := net.Listen("tcp", n.config.Node.PeerAddress)
 	if err != nil {
@@ -82,7 +87,6 @@ func (n *Node) Run(ctx context.Context) error {
 	go serve("peer", peerServer, peerListener)
 	go serve("client", clientServer, clientListener)
 
-	var runErr error
 	select {
 	case <-ctx.Done():
 	case runErr = <-serveErrors:
