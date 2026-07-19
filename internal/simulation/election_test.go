@@ -2,11 +2,36 @@ package simulation_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Het-Jethva/quorumkv/internal/raft"
 	"github.com/Het-Jethva/quorumkv/internal/simulation"
 )
+
+func newCluster(t *testing.T, seed int64) *simulation.Cluster {
+	t.Helper()
+	cluster, err := simulation.NewCluster(simulation.DefaultTiming(), simulation.NewSeededClock(seed))
+	if err != nil {
+		t.Fatalf("create Cluster: %v", err)
+	}
+	return cluster
+}
+
+func electLeader(t *testing.T, cluster *simulation.Cluster) raft.NodeID {
+	t.Helper()
+	if err := cluster.FireNextElectionTimeout(); err != nil {
+		t.Fatalf("fire election timeout: %v", err)
+	}
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if cluster.State(id).Role == raft.Leader {
+			return id
+		}
+	}
+	t.Fatal("Cluster has no Leader")
+	return ""
+}
 
 func TestThreeNodeElectionElectsExactlyOneLeader(t *testing.T) {
 	result, err := simulation.RunElection(42)
@@ -44,5 +69,126 @@ func TestFixedSeedReproducesEventAndActionSequence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("same seed produced different results:\nfirst:  %#v\nsecond: %#v", first, second)
+	}
+}
+
+func TestTimingRejectsElectionTimeoutAtOrBelowHeartbeatInterval(t *testing.T) {
+	timing := simulation.DefaultTiming()
+	timing.ElectionTimeoutMin = timing.HeartbeatInterval
+	_, err := simulation.NewCluster(timing, simulation.NewSeededClock(1))
+	if err == nil || !strings.Contains(err.Error(), "minimum election timeout must exceed heartbeat interval") {
+		t.Fatalf("NewCluster() error = %v, want heartbeat/election ordering detail", err)
+	}
+}
+
+func TestSeededClockRandomizesElectionTimeoutsReproducibly(t *testing.T) {
+	first := newCluster(t, 73).ScheduledElections()
+	second := newCluster(t, 73).ScheduledElections()
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("same seed scheduled different elections:\nfirst:  %#v\nsecond: %#v", first, second)
+	}
+
+	seen := make(map[time.Duration]struct{})
+	for _, scheduled := range first {
+		if scheduled.After < 500*time.Millisecond || scheduled.After > time.Second {
+			t.Fatalf("election timeout = %v, want [500ms, 1s]", scheduled.After)
+		}
+		seen[scheduled.After] = struct{}{}
+	}
+	if len(seen) == 1 {
+		t.Fatalf("seed produced no timeout variation: %#v", first)
+	}
+}
+
+func TestIsolatedFollowerPreVoteDoesNotDisruptHealthyMajority(t *testing.T) {
+	cluster := newCluster(t, 41)
+	leader := electLeader(t, cluster)
+	var isolated raft.NodeID
+	var majority []raft.NodeID
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if id != leader && isolated == "" {
+			isolated = id
+		} else {
+			majority = append(majority, id)
+		}
+	}
+	cluster.Partition(majority, []raft.NodeID{isolated})
+
+	term := cluster.State(leader).Term
+	for range 3 {
+		if err := cluster.FireElectionTimeout(isolated); err != nil {
+			t.Fatalf("fire isolated timeout: %v", err)
+		}
+	}
+	if got := cluster.State(isolated).Term; got != term {
+		t.Fatalf("isolated Follower Term = %d, want unchanged Term %d", got, term)
+	}
+	if got := cluster.State(leader).Role; got != raft.Leader {
+		t.Fatalf("healthy majority Leader role = %v, want Leader", got)
+	}
+
+	cluster.Heal()
+	if err := cluster.FireHeartbeatTimeout(leader); err != nil {
+		t.Fatalf("send healing heartbeat: %v", err)
+	}
+	state := cluster.State(isolated)
+	if state.Role != raft.Follower || state.Term != term || state.LeaderID != leader {
+		t.Fatalf("healed Follower state = %#v, want Follower following %q in Term %d", state, leader, term)
+	}
+}
+
+func TestCheckQuorumDemotesIsolatedLeaderAndMajorityElects(t *testing.T) {
+	cluster := newCluster(t, 99)
+	oldLeader := electLeader(t, cluster)
+	if got := cluster.HeartbeatTimeout(oldLeader); got != 100*time.Millisecond {
+		t.Fatalf("scheduled heartbeat = %v, want 100ms", got)
+	}
+	if got := cluster.CheckQuorumTimeout(oldLeader); got != time.Second {
+		t.Fatalf("scheduled check-quorum window = %v, want 1s", got)
+	}
+	var majority []raft.NodeID
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if id != oldLeader {
+			majority = append(majority, id)
+		}
+	}
+
+	// Close the contact window populated by the election's initial heartbeat,
+	// then isolate the Leader for an entire fresh window.
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("start fresh check-quorum window: %v", err)
+	}
+	cluster.Partition(majority, []raft.NodeID{oldLeader})
+	if err := cluster.FireHeartbeatTimeout(oldLeader); err != nil {
+		t.Fatalf("send partitioned heartbeat: %v", err)
+	}
+	if err := cluster.FireCheckQuorumTimeout(oldLeader); err != nil {
+		t.Fatalf("finish lost-quorum window: %v", err)
+	}
+	if got := cluster.State(oldLeader).Role; got != raft.Follower {
+		t.Fatalf("isolated Leader role = %v, want Follower", got)
+	}
+	if got := cluster.State(oldLeader).VotedFor; got != oldLeader {
+		t.Fatalf("demoted Leader vote = %q, want preserved self-vote %q", got, oldLeader)
+	}
+
+	// Both surviving election timers eventually expire. The second pre-vote
+	// can then obtain a vote from the first and form the only authoritative side.
+	for _, id := range majority {
+		if err := cluster.FireElectionTimeout(id); err != nil {
+			t.Fatalf("fire majority timeout for %s: %v", id, err)
+		}
+	}
+	leaders := 0
+	for _, id := range majority {
+		if cluster.State(id).Role == raft.Leader {
+			leaders++
+		}
+	}
+	if leaders != 1 {
+		t.Fatalf("majority Leaders = %d, want 1", leaders)
+	}
+	if cluster.State(oldLeader).Role == raft.Leader {
+		t.Fatal("isolated minority retained an authoritative Leader")
 	}
 }
