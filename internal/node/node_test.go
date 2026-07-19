@@ -3,6 +3,7 @@ package node_test
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,32 @@ func TestNodeReportsStatusAndHealthThenStops(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not stop after cancellation")
+	}
+}
+
+func TestNodeStartupRejectsConflictingDurableIdentity(t *testing.T) {
+	directory := t.TempDir()
+	base := config.Config{
+		Version:   1,
+		ClusterID: "cluster-1",
+		Node: config.Node{
+			ID:            "node-1",
+			PeerAddress:   unusedAddress(t),
+			ClientAddress: unusedAddress(t),
+			DataDir:       directory,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := node.New(base).Run(ctx); err != nil {
+		t.Fatalf("initialize Node identity: %v", err)
+	}
+
+	conflict := base
+	conflict.Node.ID = "node-2"
+	err := node.New(conflict).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "durable identity mismatch") {
+		t.Fatalf("Run() error = %v, want durable identity mismatch", err)
 	}
 }
 
