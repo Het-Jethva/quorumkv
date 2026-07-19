@@ -119,3 +119,143 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "quorumkv/v1/node.proto",
 }
+
+const (
+	PeerService_Handshake_FullMethodName = "/quorumkv.v1.PeerService/Handshake"
+	PeerService_Send_FullMethodName      = "/quorumkv.v1.PeerService/Send"
+)
+
+// PeerServiceClient is the client API for PeerService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type PeerServiceClient interface {
+	Handshake(ctx context.Context, in *HandshakeRequest, opts ...grpc.CallOption) (*HandshakeResponse, error)
+	Send(ctx context.Context, in *SendRequest, opts ...grpc.CallOption) (*SendResponse, error)
+}
+
+type peerServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewPeerServiceClient(cc grpc.ClientConnInterface) PeerServiceClient {
+	return &peerServiceClient{cc}
+}
+
+func (c *peerServiceClient) Handshake(ctx context.Context, in *HandshakeRequest, opts ...grpc.CallOption) (*HandshakeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HandshakeResponse)
+	err := c.cc.Invoke(ctx, PeerService_Handshake_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerServiceClient) Send(ctx context.Context, in *SendRequest, opts ...grpc.CallOption) (*SendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendResponse)
+	err := c.cc.Invoke(ctx, PeerService_Send_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PeerServiceServer is the server API for PeerService service.
+// All implementations must embed UnimplementedPeerServiceServer
+// for forward compatibility.
+type PeerServiceServer interface {
+	Handshake(context.Context, *HandshakeRequest) (*HandshakeResponse, error)
+	Send(context.Context, *SendRequest) (*SendResponse, error)
+	mustEmbedUnimplementedPeerServiceServer()
+}
+
+// UnimplementedPeerServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedPeerServiceServer struct{}
+
+func (UnimplementedPeerServiceServer) Handshake(context.Context, *HandshakeRequest) (*HandshakeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Handshake not implemented")
+}
+func (UnimplementedPeerServiceServer) Send(context.Context, *SendRequest) (*SendResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Send not implemented")
+}
+func (UnimplementedPeerServiceServer) mustEmbedUnimplementedPeerServiceServer() {}
+func (UnimplementedPeerServiceServer) testEmbeddedByValue()                     {}
+
+// UnsafePeerServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to PeerServiceServer will
+// result in compilation errors.
+type UnsafePeerServiceServer interface {
+	mustEmbedUnimplementedPeerServiceServer()
+}
+
+func RegisterPeerServiceServer(s grpc.ServiceRegistrar, srv PeerServiceServer) {
+	// If the following call panics, it indicates UnimplementedPeerServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&PeerService_ServiceDesc, srv)
+}
+
+func _PeerService_Handshake_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HandshakeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServiceServer).Handshake(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerService_Handshake_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServiceServer).Handshake(ctx, req.(*HandshakeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerService_Send_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServiceServer).Send(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerService_Send_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServiceServer).Send(ctx, req.(*SendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// PeerService_ServiceDesc is the grpc.ServiceDesc for PeerService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var PeerService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "quorumkv.v1.PeerService",
+	HandlerType: (*PeerServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Handshake",
+			Handler:    _PeerService_Handshake_Handler,
+		},
+		{
+			MethodName: "Send",
+			Handler:    _PeerService_Send_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "quorumkv/v1/node.proto",
+}

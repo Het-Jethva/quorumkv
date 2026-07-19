@@ -11,6 +11,7 @@ import (
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/config"
+	"github.com/Het-Jethva/quorumkv/internal/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -29,19 +30,41 @@ const (
 // Run must be called at most once.
 type Node struct {
 	quorumkvv1.UnimplementedNodeServiceServer
+	quorumkvv1.UnimplementedPeerServiceServer
 
-	config config.Config
-	ready  atomic.Bool
+	config      config.Config
+	ready       atomic.Bool
+	raftState   atomic.Value
+	events      chan raftInput
+	runtimeDone chan struct{}
+}
+
+type raftInput struct {
+	event    raft.Event
+	accepted chan struct{}
 }
 
 // New creates a node from an already validated configuration.
 func New(cfg config.Config) *Node {
-	return &Node{config: cfg}
+	n := &Node{
+		config:      cfg,
+		events:      make(chan raftInput, 256),
+		runtimeDone: make(chan struct{}),
+	}
+	n.publishRaftState(raft.State{ID: raft.NodeID(cfg.Node.ID), Role: raft.Follower})
+	return n
 }
 
 // Run serves the peer and client endpoints until cancellation or a server error.
 func (n *Node) Run(ctx context.Context) (runErr error) {
-	runtime, err := openRaftRuntime(n.config, nil)
+	local := n.config.LocalMember()
+	peers := make([]raft.NodeID, 0, len(n.config.Members)-1)
+	for id := range n.config.Members {
+		if id != n.config.Node.ID {
+			peers = append(peers, raft.NodeID(id))
+		}
+	}
+	runtime, err := openRaftRuntime(n.config, peers)
 	if err != nil {
 		return err
 	}
@@ -51,15 +74,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
-	peerListener, err := net.Listen("tcp", n.config.Node.PeerAddress)
+	peerListener, err := net.Listen("tcp", local.PeerAddress)
 	if err != nil {
-		return fmt.Errorf("listen on peer address %q: %w", n.config.Node.PeerAddress, err)
+		return fmt.Errorf("listen on peer address %q: %w", local.PeerAddress, err)
 	}
 	defer peerListener.Close()
 
-	clientListener, err := net.Listen("tcp", n.config.Node.ClientAddress)
+	clientListener, err := net.Listen("tcp", local.ClientAddress)
 	if err != nil {
-		return fmt.Errorf("listen on client address %q: %w", n.config.Node.ClientAddress, err)
+		return fmt.Errorf("listen on client address %q: %w", local.ClientAddress, err)
 	}
 	defer clientListener.Close()
 
@@ -71,11 +94,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	healthServer.SetServingStatus(ReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	grpc_health_v1.RegisterHealthServer(clientServer, healthServer)
 	quorumkvv1.RegisterNodeServiceServer(clientServer, n)
+	quorumkvv1.RegisterPeerServiceServer(peerServer, n)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	transport := newPeerTransport(n.config)
+	defer func() {
+		if err := transport.close(); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 
 	n.ready.Store(true)
 	healthServer.SetServingStatus(ReadinessService, grpc_health_v1.HealthCheckResponse_SERVING)
 
-	serveErrors := make(chan error, 2)
+	serveErrors := make(chan error, 3)
 	var servers sync.WaitGroup
 	serve := func(name string, server *grpc.Server, listener net.Listener) {
 		defer servers.Done()
@@ -86,11 +119,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	servers.Add(2)
 	go serve("peer", peerServer, peerListener)
 	go serve("client", clientServer, clientListener)
+	servers.Add(1)
+	go func() {
+		defer servers.Done()
+		defer close(n.runtimeDone)
+		if err := n.runRaft(runCtx, runtime, transport); err != nil {
+			serveErrors <- fmt.Errorf("run Raft: %w", err)
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
 	case runErr = <-serveErrors:
 	}
+	cancel()
 
 	n.ready.Store(false)
 	healthServer.SetServingStatus(ReadinessService, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
@@ -124,11 +166,33 @@ func (n *Node) GetStatus(context.Context, *quorumkvv1.GetStatusRequest) (*quorum
 	if n.ready.Load() {
 		state = quorumkvv1.NodeState_NODE_STATE_READY
 	}
+	local := n.config.LocalMember()
+	raftState := n.raftState.Load().(raft.State)
 	return &quorumkvv1.GetStatusResponse{
 		ClusterId:     n.config.ClusterID,
 		NodeId:        n.config.Node.ID,
 		State:         state,
-		PeerAddress:   n.config.Node.PeerAddress,
-		ClientAddress: n.config.Node.ClientAddress,
+		PeerAddress:   local.PeerAddress,
+		ClientAddress: local.ClientAddress,
+		Role:          encodeRole(raftState.Role),
+		LeaderId:      string(raftState.LeaderID),
+		Term:          raftState.Term,
 	}, nil
+}
+
+func (n *Node) publishRaftState(state raft.State) { n.raftState.Store(state) }
+
+func encodeRole(role raft.Role) quorumkvv1.RaftRole {
+	switch role {
+	case raft.Follower:
+		return quorumkvv1.RaftRole_RAFT_ROLE_FOLLOWER
+	case raft.PreCandidate:
+		return quorumkvv1.RaftRole_RAFT_ROLE_PRE_CANDIDATE
+	case raft.Candidate:
+		return quorumkvv1.RaftRole_RAFT_ROLE_CANDIDATE
+	case raft.Leader:
+		return quorumkvv1.RaftRole_RAFT_ROLE_LEADER
+	default:
+		return quorumkvv1.RaftRole_RAFT_ROLE_UNSPECIFIED
+	}
 }

@@ -49,7 +49,10 @@ func run(args []string) error {
 		State         string `json:"state"`
 		PeerAddress   string `json:"peer_address"`
 		ClientAddress string `json:"client_address"`
-	}{status.ClusterId, status.NodeId, status.State.String(), status.PeerAddress, status.ClientAddress}
+		Role          string `json:"role"`
+		LeaderID      string `json:"leader_id,omitempty"`
+		Term          uint64 `json:"term"`
+	}{status.ClusterId, status.NodeId, status.State.String(), status.PeerAddress, status.ClientAddress, status.Role.String(), status.LeaderId, status.Term}
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		return fmt.Errorf("write status: %w", err)
 	}

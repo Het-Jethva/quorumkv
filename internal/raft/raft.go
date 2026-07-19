@@ -308,9 +308,15 @@ func NewNode(id NodeID, peers []NodeID) *Node {
 // Recovered state is durable by definition, so a vote cannot be granted again
 // in the same Term after restart.
 func NewNodeWithHardState(id NodeID, peers []NodeID, hardState HardState) *Node {
+	return NewNodeWithLog(id, peers, hardState, nil)
+}
+
+// NewNodeWithLog creates a Follower from durable election state and log
+// entries recovered by the runtime.
+func NewNodeWithLog(id NodeID, peers []NodeID, hardState HardState, entries []LogEntry) *Node {
 	orderedPeers := append([]NodeID(nil), peers...)
 	sort.Slice(orderedPeers, func(i, j int) bool { return orderedPeers[i] < orderedPeers[j] })
-	return &Node{
+	node := &Node{
 		id:              id,
 		peers:           orderedPeers,
 		role:            Follower,
@@ -325,6 +331,13 @@ func NewNodeWithHardState(id NodeID, peers []NodeID, hardState HardState) *Node 
 		pending:         make(map[uint64]pendingPersistence),
 		pendingLog:      make(map[uint64]pendingLogPersistence),
 	}
+	if len(entries) > 0 {
+		node.log = append([]LogEntry(nil), entries...)
+		node.lastLogIndex = entries[len(entries)-1].Index
+		node.lastLogTerm = entries[len(entries)-1].Term
+		node.durableLogIndex = node.lastLogIndex
+	}
+	return node
 }
 
 // State returns the Node's current deterministic state.

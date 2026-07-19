@@ -70,6 +70,107 @@ func (NodeState) EnumDescriptor() ([]byte, []int) {
 	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{0}
 }
 
+type RaftRole int32
+
+const (
+	RaftRole_RAFT_ROLE_UNSPECIFIED   RaftRole = 0
+	RaftRole_RAFT_ROLE_FOLLOWER      RaftRole = 1
+	RaftRole_RAFT_ROLE_PRE_CANDIDATE RaftRole = 2
+	RaftRole_RAFT_ROLE_CANDIDATE     RaftRole = 3
+	RaftRole_RAFT_ROLE_LEADER        RaftRole = 4
+)
+
+// Enum value maps for RaftRole.
+var (
+	RaftRole_name = map[int32]string{
+		0: "RAFT_ROLE_UNSPECIFIED",
+		1: "RAFT_ROLE_FOLLOWER",
+		2: "RAFT_ROLE_PRE_CANDIDATE",
+		3: "RAFT_ROLE_CANDIDATE",
+		4: "RAFT_ROLE_LEADER",
+	}
+	RaftRole_value = map[string]int32{
+		"RAFT_ROLE_UNSPECIFIED":   0,
+		"RAFT_ROLE_FOLLOWER":      1,
+		"RAFT_ROLE_PRE_CANDIDATE": 2,
+		"RAFT_ROLE_CANDIDATE":     3,
+		"RAFT_ROLE_LEADER":        4,
+	}
+)
+
+func (x RaftRole) Enum() *RaftRole {
+	p := new(RaftRole)
+	*p = x
+	return p
+}
+
+func (x RaftRole) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RaftRole) Descriptor() protoreflect.EnumDescriptor {
+	return file_quorumkv_v1_node_proto_enumTypes[1].Descriptor()
+}
+
+func (RaftRole) Type() protoreflect.EnumType {
+	return &file_quorumkv_v1_node_proto_enumTypes[1]
+}
+
+func (x RaftRole) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RaftRole.Descriptor instead.
+func (RaftRole) EnumDescriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{1}
+}
+
+type RaftEntryType int32
+
+const (
+	RaftEntryType_RAFT_ENTRY_TYPE_UNSPECIFIED RaftEntryType = 0
+	RaftEntryType_RAFT_ENTRY_TYPE_NO_OP       RaftEntryType = 1
+)
+
+// Enum value maps for RaftEntryType.
+var (
+	RaftEntryType_name = map[int32]string{
+		0: "RAFT_ENTRY_TYPE_UNSPECIFIED",
+		1: "RAFT_ENTRY_TYPE_NO_OP",
+	}
+	RaftEntryType_value = map[string]int32{
+		"RAFT_ENTRY_TYPE_UNSPECIFIED": 0,
+		"RAFT_ENTRY_TYPE_NO_OP":       1,
+	}
+)
+
+func (x RaftEntryType) Enum() *RaftEntryType {
+	p := new(RaftEntryType)
+	*p = x
+	return p
+}
+
+func (x RaftEntryType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RaftEntryType) Descriptor() protoreflect.EnumDescriptor {
+	return file_quorumkv_v1_node_proto_enumTypes[2].Descriptor()
+}
+
+func (RaftEntryType) Type() protoreflect.EnumType {
+	return &file_quorumkv_v1_node_proto_enumTypes[2]
+}
+
+func (x RaftEntryType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RaftEntryType.Descriptor instead.
+func (RaftEntryType) EnumDescriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{2}
+}
+
 type GetStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -113,6 +214,9 @@ type GetStatusResponse struct {
 	State         NodeState              `protobuf:"varint,3,opt,name=state,proto3,enum=quorumkv.v1.NodeState" json:"state,omitempty"`
 	PeerAddress   string                 `protobuf:"bytes,4,opt,name=peer_address,json=peerAddress,proto3" json:"peer_address,omitempty"`
 	ClientAddress string                 `protobuf:"bytes,5,opt,name=client_address,json=clientAddress,proto3" json:"client_address,omitempty"`
+	Role          RaftRole               `protobuf:"varint,6,opt,name=role,proto3,enum=quorumkv.v1.RaftRole" json:"role,omitempty"`
+	LeaderId      string                 `protobuf:"bytes,7,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	Term          uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -182,25 +286,889 @@ func (x *GetStatusResponse) GetClientAddress() string {
 	return ""
 }
 
+func (x *GetStatusResponse) GetRole() RaftRole {
+	if x != nil {
+		return x.Role
+	}
+	return RaftRole_RAFT_ROLE_UNSPECIFIED
+}
+
+func (x *GetStatusResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *GetStatusResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+type HandshakeRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	ClusterId       string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	NodeId          string                 `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	TargetNodeId    string                 `protobuf:"bytes,4,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HandshakeRequest) Reset() {
+	*x = HandshakeRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandshakeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandshakeRequest) ProtoMessage() {}
+
+func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandshakeRequest.ProtoReflect.Descriptor instead.
+func (*HandshakeRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *HandshakeRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *HandshakeRequest) GetClusterId() string {
+	if x != nil {
+		return x.ClusterId
+	}
+	return ""
+}
+
+func (x *HandshakeRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HandshakeRequest) GetTargetNodeId() string {
+	if x != nil {
+		return x.TargetNodeId
+	}
+	return ""
+}
+
+type HandshakeResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	ClusterId       string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	NodeId          string                 `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HandshakeResponse) Reset() {
+	*x = HandshakeResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandshakeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandshakeResponse) ProtoMessage() {}
+
+func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
+func (*HandshakeResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *HandshakeResponse) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *HandshakeResponse) GetClusterId() string {
+	if x != nil {
+		return x.ClusterId
+	}
+	return ""
+}
+
+func (x *HandshakeResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+type SendRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	ClusterId       string                 `protobuf:"bytes,2,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	FromNodeId      string                 `protobuf:"bytes,3,opt,name=from_node_id,json=fromNodeId,proto3" json:"from_node_id,omitempty"`
+	ToNodeId        string                 `protobuf:"bytes,4,opt,name=to_node_id,json=toNodeId,proto3" json:"to_node_id,omitempty"`
+	// Types that are valid to be assigned to Message:
+	//
+	//	*SendRequest_PreVoteRequest
+	//	*SendRequest_PreVoteResponse
+	//	*SendRequest_VoteRequest
+	//	*SendRequest_VoteResponse
+	//	*SendRequest_AppendEntriesRequest
+	//	*SendRequest_AppendEntriesResponse
+	Message       isSendRequest_Message `protobuf_oneof:"message"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendRequest) Reset() {
+	*x = SendRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendRequest) ProtoMessage() {}
+
+func (x *SendRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
+func (*SendRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SendRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *SendRequest) GetClusterId() string {
+	if x != nil {
+		return x.ClusterId
+	}
+	return ""
+}
+
+func (x *SendRequest) GetFromNodeId() string {
+	if x != nil {
+		return x.FromNodeId
+	}
+	return ""
+}
+
+func (x *SendRequest) GetToNodeId() string {
+	if x != nil {
+		return x.ToNodeId
+	}
+	return ""
+}
+
+func (x *SendRequest) GetMessage() isSendRequest_Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
+func (x *SendRequest) GetPreVoteRequest() *PreVoteRequest {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_PreVoteRequest); ok {
+			return x.PreVoteRequest
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetPreVoteResponse() *PreVoteResponse {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_PreVoteResponse); ok {
+			return x.PreVoteResponse
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetVoteRequest() *VoteRequest {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_VoteRequest); ok {
+			return x.VoteRequest
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetVoteResponse() *VoteResponse {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_VoteResponse); ok {
+			return x.VoteResponse
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetAppendEntriesRequest() *AppendEntriesRequest {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_AppendEntriesRequest); ok {
+			return x.AppendEntriesRequest
+		}
+	}
+	return nil
+}
+
+func (x *SendRequest) GetAppendEntriesResponse() *AppendEntriesResponse {
+	if x != nil {
+		if x, ok := x.Message.(*SendRequest_AppendEntriesResponse); ok {
+			return x.AppendEntriesResponse
+		}
+	}
+	return nil
+}
+
+type isSendRequest_Message interface {
+	isSendRequest_Message()
+}
+
+type SendRequest_PreVoteRequest struct {
+	PreVoteRequest *PreVoteRequest `protobuf:"bytes,5,opt,name=pre_vote_request,json=preVoteRequest,proto3,oneof"`
+}
+
+type SendRequest_PreVoteResponse struct {
+	PreVoteResponse *PreVoteResponse `protobuf:"bytes,6,opt,name=pre_vote_response,json=preVoteResponse,proto3,oneof"`
+}
+
+type SendRequest_VoteRequest struct {
+	VoteRequest *VoteRequest `protobuf:"bytes,7,opt,name=vote_request,json=voteRequest,proto3,oneof"`
+}
+
+type SendRequest_VoteResponse struct {
+	VoteResponse *VoteResponse `protobuf:"bytes,8,opt,name=vote_response,json=voteResponse,proto3,oneof"`
+}
+
+type SendRequest_AppendEntriesRequest struct {
+	AppendEntriesRequest *AppendEntriesRequest `protobuf:"bytes,9,opt,name=append_entries_request,json=appendEntriesRequest,proto3,oneof"`
+}
+
+type SendRequest_AppendEntriesResponse struct {
+	AppendEntriesResponse *AppendEntriesResponse `protobuf:"bytes,10,opt,name=append_entries_response,json=appendEntriesResponse,proto3,oneof"`
+}
+
+func (*SendRequest_PreVoteRequest) isSendRequest_Message() {}
+
+func (*SendRequest_PreVoteResponse) isSendRequest_Message() {}
+
+func (*SendRequest_VoteRequest) isSendRequest_Message() {}
+
+func (*SendRequest_VoteResponse) isSendRequest_Message() {}
+
+func (*SendRequest_AppendEntriesRequest) isSendRequest_Message() {}
+
+func (*SendRequest_AppendEntriesResponse) isSendRequest_Message() {}
+
+type SendResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendResponse) Reset() {
+	*x = SendResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendResponse) ProtoMessage() {}
+
+func (x *SendResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
+func (*SendResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{5}
+}
+
+type PreVoteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LastLogIndex  uint64                 `protobuf:"varint,2,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	LastLogTerm   uint64                 `protobuf:"varint,3,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PreVoteRequest) Reset() {
+	*x = PreVoteRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreVoteRequest) ProtoMessage() {}
+
+func (x *PreVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreVoteRequest.ProtoReflect.Descriptor instead.
+func (*PreVoteRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PreVoteRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *PreVoteRequest) GetLastLogIndex() uint64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *PreVoteRequest) GetLastLogTerm() uint64 {
+	if x != nil {
+		return x.LastLogTerm
+	}
+	return 0
+}
+
+type PreVoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	CurrentTerm   uint64                 `protobuf:"varint,2,opt,name=current_term,json=currentTerm,proto3" json:"current_term,omitempty"`
+	Granted       bool                   `protobuf:"varint,3,opt,name=granted,proto3" json:"granted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PreVoteResponse) Reset() {
+	*x = PreVoteResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreVoteResponse) ProtoMessage() {}
+
+func (x *PreVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreVoteResponse.ProtoReflect.Descriptor instead.
+func (*PreVoteResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PreVoteResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *PreVoteResponse) GetCurrentTerm() uint64 {
+	if x != nil {
+		return x.CurrentTerm
+	}
+	return 0
+}
+
+func (x *PreVoteResponse) GetGranted() bool {
+	if x != nil {
+		return x.Granted
+	}
+	return false
+}
+
+type VoteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LastLogIndex  uint64                 `protobuf:"varint,2,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	LastLogTerm   uint64                 `protobuf:"varint,3,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VoteRequest) Reset() {
+	*x = VoteRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VoteRequest) ProtoMessage() {}
+
+func (x *VoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VoteRequest.ProtoReflect.Descriptor instead.
+func (*VoteRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *VoteRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *VoteRequest) GetLastLogIndex() uint64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *VoteRequest) GetLastLogTerm() uint64 {
+	if x != nil {
+		return x.LastLogTerm
+	}
+	return 0
+}
+
+type VoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	Granted       bool                   `protobuf:"varint,2,opt,name=granted,proto3" json:"granted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VoteResponse) Reset() {
+	*x = VoteResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VoteResponse) ProtoMessage() {}
+
+func (x *VoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VoteResponse.ProtoReflect.Descriptor instead.
+func (*VoteResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *VoteResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *VoteResponse) GetGranted() bool {
+	if x != nil {
+		return x.Granted
+	}
+	return false
+}
+
+type AppendEntriesRequest struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Term             uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	PreviousLogIndex uint64                 `protobuf:"varint,2,opt,name=previous_log_index,json=previousLogIndex,proto3" json:"previous_log_index,omitempty"`
+	PreviousLogTerm  uint64                 `protobuf:"varint,3,opt,name=previous_log_term,json=previousLogTerm,proto3" json:"previous_log_term,omitempty"`
+	Entries          []*RaftLogEntry        `protobuf:"bytes,4,rep,name=entries,proto3" json:"entries,omitempty"`
+	LeaderCommit     uint64                 `protobuf:"varint,5,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *AppendEntriesRequest) Reset() {
+	*x = AppendEntriesRequest{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesRequest) ProtoMessage() {}
+
+func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
+func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AppendEntriesRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetPreviousLogIndex() uint64 {
+	if x != nil {
+		return x.PreviousLogIndex
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetPreviousLogTerm() uint64 {
+	if x != nil {
+		return x.PreviousLogTerm
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetEntries() []*RaftLogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *AppendEntriesRequest) GetLeaderCommit() uint64 {
+	if x != nil {
+		return x.LeaderCommit
+	}
+	return 0
+}
+
+type AppendEntriesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	MatchIndex    uint64                 `protobuf:"varint,3,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendEntriesResponse) Reset() {
+	*x = AppendEntriesResponse{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesResponse) ProtoMessage() {}
+
+func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
+func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AppendEntriesResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *AppendEntriesResponse) GetMatchIndex() uint64 {
+	if x != nil {
+		return x.MatchIndex
+	}
+	return 0
+}
+
+type RaftLogEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Term          uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	Type          RaftEntryType          `protobuf:"varint,3,opt,name=type,proto3,enum=quorumkv.v1.RaftEntryType" json:"type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RaftLogEntry) Reset() {
+	*x = RaftLogEntry{}
+	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RaftLogEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RaftLogEntry) ProtoMessage() {}
+
+func (x *RaftLogEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_quorumkv_v1_node_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RaftLogEntry.ProtoReflect.Descriptor instead.
+func (*RaftLogEntry) Descriptor() ([]byte, []int) {
+	return file_quorumkv_v1_node_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RaftLogEntry) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *RaftLogEntry) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RaftLogEntry) GetType() RaftEntryType {
+	if x != nil {
+		return x.Type
+	}
+	return RaftEntryType_RAFT_ENTRY_TYPE_UNSPECIFIED
+}
+
 var File_quorumkv_v1_node_proto protoreflect.FileDescriptor
 
 const file_quorumkv_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"\x16quorumkv/v1/node.proto\x12\vquorumkv.v1\"\x12\n" +
-	"\x10GetStatusRequest\"\xc3\x01\n" +
+	"\x10GetStatusRequest\"\x9f\x02\n" +
 	"\x11GetStatusResponse\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12,\n" +
 	"\x05state\x18\x03 \x01(\x0e2\x16.quorumkv.v1.NodeStateR\x05state\x12!\n" +
 	"\fpeer_address\x18\x04 \x01(\tR\vpeerAddress\x12%\n" +
-	"\x0eclient_address\x18\x05 \x01(\tR\rclientAddress*V\n" +
+	"\x0eclient_address\x18\x05 \x01(\tR\rclientAddress\x12)\n" +
+	"\x04role\x18\x06 \x01(\x0e2\x15.quorumkv.v1.RaftRoleR\x04role\x12\x1b\n" +
+	"\tleader_id\x18\a \x01(\tR\bleaderId\x12\x12\n" +
+	"\x04term\x18\b \x01(\x04R\x04term\"\x9b\x01\n" +
+	"\x10HandshakeRequest\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
+	"\n" +
+	"cluster_id\x18\x02 \x01(\tR\tclusterId\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\tR\x06nodeId\x12$\n" +
+	"\x0etarget_node_id\x18\x04 \x01(\tR\ftargetNodeId\"v\n" +
+	"\x11HandshakeResponse\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
+	"\n" +
+	"cluster_id\x18\x02 \x01(\tR\tclusterId\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\tR\x06nodeId\"\xf1\x04\n" +
+	"\vSendRequest\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
+	"\n" +
+	"cluster_id\x18\x02 \x01(\tR\tclusterId\x12 \n" +
+	"\ffrom_node_id\x18\x03 \x01(\tR\n" +
+	"fromNodeId\x12\x1c\n" +
+	"\n" +
+	"to_node_id\x18\x04 \x01(\tR\btoNodeId\x12G\n" +
+	"\x10pre_vote_request\x18\x05 \x01(\v2\x1b.quorumkv.v1.PreVoteRequestH\x00R\x0epreVoteRequest\x12J\n" +
+	"\x11pre_vote_response\x18\x06 \x01(\v2\x1c.quorumkv.v1.PreVoteResponseH\x00R\x0fpreVoteResponse\x12=\n" +
+	"\fvote_request\x18\a \x01(\v2\x18.quorumkv.v1.VoteRequestH\x00R\vvoteRequest\x12@\n" +
+	"\rvote_response\x18\b \x01(\v2\x19.quorumkv.v1.VoteResponseH\x00R\fvoteResponse\x12Y\n" +
+	"\x16append_entries_request\x18\t \x01(\v2!.quorumkv.v1.AppendEntriesRequestH\x00R\x14appendEntriesRequest\x12\\\n" +
+	"\x17append_entries_response\x18\n" +
+	" \x01(\v2\".quorumkv.v1.AppendEntriesResponseH\x00R\x15appendEntriesResponseB\t\n" +
+	"\amessage\"\x0e\n" +
+	"\fSendResponse\"n\n" +
+	"\x0ePreVoteRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12$\n" +
+	"\x0elast_log_index\x18\x02 \x01(\x04R\flastLogIndex\x12\"\n" +
+	"\rlast_log_term\x18\x03 \x01(\x04R\vlastLogTerm\"b\n" +
+	"\x0fPreVoteResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12!\n" +
+	"\fcurrent_term\x18\x02 \x01(\x04R\vcurrentTerm\x12\x18\n" +
+	"\agranted\x18\x03 \x01(\bR\agranted\"k\n" +
+	"\vVoteRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12$\n" +
+	"\x0elast_log_index\x18\x02 \x01(\x04R\flastLogIndex\x12\"\n" +
+	"\rlast_log_term\x18\x03 \x01(\x04R\vlastLogTerm\"<\n" +
+	"\fVoteResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
+	"\agranted\x18\x02 \x01(\bR\agranted\"\xde\x01\n" +
+	"\x14AppendEntriesRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12,\n" +
+	"\x12previous_log_index\x18\x02 \x01(\x04R\x10previousLogIndex\x12*\n" +
+	"\x11previous_log_term\x18\x03 \x01(\x04R\x0fpreviousLogTerm\x123\n" +
+	"\aentries\x18\x04 \x03(\v2\x19.quorumkv.v1.RaftLogEntryR\aentries\x12#\n" +
+	"\rleader_commit\x18\x05 \x01(\x04R\fleaderCommit\"f\n" +
+	"\x15AppendEntriesResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1f\n" +
+	"\vmatch_index\x18\x03 \x01(\x04R\n" +
+	"matchIndex\"h\n" +
+	"\fRaftLogEntry\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x04R\x04term\x12.\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x1a.quorumkv.v1.RaftEntryTypeR\x04type*V\n" +
 	"\tNodeState\x12\x1a\n" +
 	"\x16NODE_STATE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13NODE_STATE_STARTING\x10\x01\x12\x14\n" +
-	"\x10NODE_STATE_READY\x10\x022Y\n" +
+	"\x10NODE_STATE_READY\x10\x02*\x89\x01\n" +
+	"\bRaftRole\x12\x19\n" +
+	"\x15RAFT_ROLE_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12RAFT_ROLE_FOLLOWER\x10\x01\x12\x1b\n" +
+	"\x17RAFT_ROLE_PRE_CANDIDATE\x10\x02\x12\x17\n" +
+	"\x13RAFT_ROLE_CANDIDATE\x10\x03\x12\x14\n" +
+	"\x10RAFT_ROLE_LEADER\x10\x04*K\n" +
+	"\rRaftEntryType\x12\x1f\n" +
+	"\x1bRAFT_ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15RAFT_ENTRY_TYPE_NO_OP\x10\x012Y\n" +
 	"\vNodeService\x12J\n" +
-	"\tGetStatus\x12\x1d.quorumkv.v1.GetStatusRequest\x1a\x1e.quorumkv.v1.GetStatusResponseB;Z9github.com/Het-Jethva/quorumkv/gen/quorumkv/v1;quorumkvv1b\x06proto3"
+	"\tGetStatus\x12\x1d.quorumkv.v1.GetStatusRequest\x1a\x1e.quorumkv.v1.GetStatusResponse2\x96\x01\n" +
+	"\vPeerService\x12J\n" +
+	"\tHandshake\x12\x1d.quorumkv.v1.HandshakeRequest\x1a\x1e.quorumkv.v1.HandshakeResponse\x12;\n" +
+	"\x04Send\x12\x18.quorumkv.v1.SendRequest\x1a\x19.quorumkv.v1.SendResponseB;Z9github.com/Het-Jethva/quorumkv/gen/quorumkv/v1;quorumkvv1b\x06proto3"
 
 var (
 	file_quorumkv_v1_node_proto_rawDescOnce sync.Once
@@ -214,22 +1182,48 @@ func file_quorumkv_v1_node_proto_rawDescGZIP() []byte {
 	return file_quorumkv_v1_node_proto_rawDescData
 }
 
-var file_quorumkv_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_quorumkv_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_quorumkv_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_quorumkv_v1_node_proto_goTypes = []any{
-	(NodeState)(0),            // 0: quorumkv.v1.NodeState
-	(*GetStatusRequest)(nil),  // 1: quorumkv.v1.GetStatusRequest
-	(*GetStatusResponse)(nil), // 2: quorumkv.v1.GetStatusResponse
+	(NodeState)(0),                // 0: quorumkv.v1.NodeState
+	(RaftRole)(0),                 // 1: quorumkv.v1.RaftRole
+	(RaftEntryType)(0),            // 2: quorumkv.v1.RaftEntryType
+	(*GetStatusRequest)(nil),      // 3: quorumkv.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),     // 4: quorumkv.v1.GetStatusResponse
+	(*HandshakeRequest)(nil),      // 5: quorumkv.v1.HandshakeRequest
+	(*HandshakeResponse)(nil),     // 6: quorumkv.v1.HandshakeResponse
+	(*SendRequest)(nil),           // 7: quorumkv.v1.SendRequest
+	(*SendResponse)(nil),          // 8: quorumkv.v1.SendResponse
+	(*PreVoteRequest)(nil),        // 9: quorumkv.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),       // 10: quorumkv.v1.PreVoteResponse
+	(*VoteRequest)(nil),           // 11: quorumkv.v1.VoteRequest
+	(*VoteResponse)(nil),          // 12: quorumkv.v1.VoteResponse
+	(*AppendEntriesRequest)(nil),  // 13: quorumkv.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil), // 14: quorumkv.v1.AppendEntriesResponse
+	(*RaftLogEntry)(nil),          // 15: quorumkv.v1.RaftLogEntry
 }
 var file_quorumkv_v1_node_proto_depIdxs = []int32{
-	0, // 0: quorumkv.v1.GetStatusResponse.state:type_name -> quorumkv.v1.NodeState
-	1, // 1: quorumkv.v1.NodeService.GetStatus:input_type -> quorumkv.v1.GetStatusRequest
-	2, // 2: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0,  // 0: quorumkv.v1.GetStatusResponse.state:type_name -> quorumkv.v1.NodeState
+	1,  // 1: quorumkv.v1.GetStatusResponse.role:type_name -> quorumkv.v1.RaftRole
+	9,  // 2: quorumkv.v1.SendRequest.pre_vote_request:type_name -> quorumkv.v1.PreVoteRequest
+	10, // 3: quorumkv.v1.SendRequest.pre_vote_response:type_name -> quorumkv.v1.PreVoteResponse
+	11, // 4: quorumkv.v1.SendRequest.vote_request:type_name -> quorumkv.v1.VoteRequest
+	12, // 5: quorumkv.v1.SendRequest.vote_response:type_name -> quorumkv.v1.VoteResponse
+	13, // 6: quorumkv.v1.SendRequest.append_entries_request:type_name -> quorumkv.v1.AppendEntriesRequest
+	14, // 7: quorumkv.v1.SendRequest.append_entries_response:type_name -> quorumkv.v1.AppendEntriesResponse
+	15, // 8: quorumkv.v1.AppendEntriesRequest.entries:type_name -> quorumkv.v1.RaftLogEntry
+	2,  // 9: quorumkv.v1.RaftLogEntry.type:type_name -> quorumkv.v1.RaftEntryType
+	3,  // 10: quorumkv.v1.NodeService.GetStatus:input_type -> quorumkv.v1.GetStatusRequest
+	5,  // 11: quorumkv.v1.PeerService.Handshake:input_type -> quorumkv.v1.HandshakeRequest
+	7,  // 12: quorumkv.v1.PeerService.Send:input_type -> quorumkv.v1.SendRequest
+	4,  // 13: quorumkv.v1.NodeService.GetStatus:output_type -> quorumkv.v1.GetStatusResponse
+	6,  // 14: quorumkv.v1.PeerService.Handshake:output_type -> quorumkv.v1.HandshakeResponse
+	8,  // 15: quorumkv.v1.PeerService.Send:output_type -> quorumkv.v1.SendResponse
+	13, // [13:16] is the sub-list for method output_type
+	10, // [10:13] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_quorumkv_v1_node_proto_init() }
@@ -237,15 +1231,23 @@ func file_quorumkv_v1_node_proto_init() {
 	if File_quorumkv_v1_node_proto != nil {
 		return
 	}
+	file_quorumkv_v1_node_proto_msgTypes[4].OneofWrappers = []any{
+		(*SendRequest_PreVoteRequest)(nil),
+		(*SendRequest_PreVoteResponse)(nil),
+		(*SendRequest_VoteRequest)(nil),
+		(*SendRequest_VoteResponse)(nil),
+		(*SendRequest_AppendEntriesRequest)(nil),
+		(*SendRequest_AppendEntriesResponse)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_quorumkv_v1_node_proto_rawDesc), len(file_quorumkv_v1_node_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   2,
+			NumEnums:      3,
+			NumMessages:   13,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_quorumkv_v1_node_proto_goTypes,
 		DependencyIndexes: file_quorumkv_v1_node_proto_depIdxs,

@@ -13,17 +13,22 @@ import (
 
 // Config contains the static identity and local settings for one node.
 type Config struct {
-	Version   int    `yaml:"version"`
-	ClusterID string `yaml:"cluster_id"`
-	Node      Node   `yaml:"node"`
+	Version   int               `yaml:"version"`
+	ClusterID string            `yaml:"cluster_id"`
+	Node      Node              `yaml:"node"`
+	Members   map[string]Member `yaml:"members"`
 }
 
 // Node contains settings owned by this process.
 type Node struct {
-	ID            string `yaml:"id"`
+	ID      string `yaml:"id"`
+	DataDir string `yaml:"data_dir"`
+}
+
+// Member contains the runtime addresses for one configured Cluster member.
+type Member struct {
 	PeerAddress   string `yaml:"peer_address"`
 	ClientAddress string `yaml:"client_address"`
-	DataDir       string `yaml:"data_dir"`
 }
 
 // Load reads and validates a node configuration file.
@@ -61,20 +66,43 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Node.ID) == "" {
 		problems = append(problems, errors.New("node.id is required"))
 	}
-	if err := validateAddress("node.peer_address", c.Node.PeerAddress); err != nil {
-		problems = append(problems, err)
-	}
-	if err := validateAddress("node.client_address", c.Node.ClientAddress); err != nil {
-		problems = append(problems, err)
-	}
-	if c.Node.PeerAddress != "" && c.Node.PeerAddress == c.Node.ClientAddress {
-		problems = append(problems, errors.New("node peer and client addresses must be different"))
-	}
 	if strings.TrimSpace(c.Node.DataDir) == "" {
 		problems = append(problems, errors.New("node.data_dir is required"))
 	}
+	if len(c.Members) != 3 {
+		problems = append(problems, fmt.Errorf("members must contain exactly three Nodes, got %d", len(c.Members)))
+	}
+	if c.Node.ID != "" {
+		if _, ok := c.Members[c.Node.ID]; !ok {
+			problems = append(problems, fmt.Errorf("node.id %q is not present in members", c.Node.ID))
+		}
+	}
+	addresses := make(map[string]string, len(c.Members)*2)
+	for id, member := range c.Members {
+		if strings.TrimSpace(id) == "" {
+			problems = append(problems, errors.New("member Node Identity must not be empty"))
+		}
+		for name, address := range map[string]string{
+			"peer_address":   member.PeerAddress,
+			"client_address": member.ClientAddress,
+		} {
+			field := fmt.Sprintf("members[%q].%s", id, name)
+			if err := validateAddress(field, address); err != nil {
+				problems = append(problems, err)
+				continue
+			}
+			if owner, exists := addresses[address]; exists {
+				problems = append(problems, fmt.Errorf("%s duplicates %s at %q", field, owner, address))
+			} else {
+				addresses[address] = field
+			}
+		}
+	}
 	return errors.Join(problems...)
 }
+
+// LocalMember returns this process's addresses from the shared member map.
+func (c Config) LocalMember() Member { return c.Members[c.Node.ID] }
 
 func validateAddress(name, address string) error {
 	if strings.TrimSpace(address) == "" {
