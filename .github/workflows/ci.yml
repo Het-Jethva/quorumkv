@@ -9,30 +9,59 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+      - name: Prepare failure artifacts
+        run: mkdir -p artifacts
       - name: Check formatting
-        if: runner.os == 'Linux'
-        shell: bash
         run: test -z "$(gofmt -l .)"
-      - name: Test
-        run: go test ./...
+      - name: Test full suite
+        shell: bash
+        run: set -o pipefail; go test -json ./... | tee artifacts/go-test.json
       - name: Build commands
         run: go build ./cmd/...
       - name: Race detection
-        if: runner.os == 'Linux'
-        run: go test -race ./...
+        shell: bash
+        run: set -o pipefail; go test -race -json ./... | tee artifacts/go-test-race.json
       - name: Vet
-        run: go vet ./...
+        shell: bash
+        run: set -o pipefail; go vet ./... 2>&1 | tee artifacts/go-vet.log
+      - name: Run real-process failure scenarios
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -v ./internal/node \
+            -run 'Test(ThreeProcesses|LostSetResponse|SetSurvivesLeaderCrashAtEveryMutationBoundary|ThreeProcessesRepairFollower)' \
+            2>&1 | tee artifacts/real-process.log
+      - name: Record a replayable seeded failure trace
+        run: go run ./cmd/quorumkvsim -seed 20250308 -steps 400 -trace artifacts/simulation-trace.json
+      - name: Upload Linux diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-diagnostics
+          path: artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-portable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test portable core and durable store
+        run: go test ./internal/config ./internal/raft ./internal/snapshot ./internal/simulation ./internal/wal
+      - name: Vet portable packages
+        run: go vet ./internal/config ./internal/raft ./internal/snapshot ./internal/simulation ./internal/wal
 
   seeded-simulation:
     runs-on: ubuntu-latest
