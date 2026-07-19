@@ -58,6 +58,54 @@ func TestThreeNodeElectionElectsExactlyOneLeader(t *testing.T) {
 	}
 }
 
+func TestElectedLeaderCommitsNoOpBeforeReportingReadReady(t *testing.T) {
+	cluster := newCluster(t, 42)
+	leader := electLeader(t, cluster)
+
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		state := cluster.State(id)
+		if state.CommitIndex != 1 || state.LastApplied != 1 {
+			t.Fatalf("Node %s state = %#v, want no-op committed and applied", id, state)
+		}
+		applied := cluster.AppliedEntries(id)
+		want := []raft.LogEntry{{Index: 1, Term: 1, Type: raft.EntryNoOp}}
+		if !reflect.DeepEqual(applied, want) {
+			t.Fatalf("Node %s applied entries = %#v, want %#v", id, applied, want)
+		}
+	}
+	if state := cluster.State(leader); !state.ReadReady {
+		t.Fatalf("Leader state = %#v, want read readiness after applied no-op", state)
+	}
+
+	readReadyStep := -1
+	applyStep := -1
+	for index, step := range cluster.Trace() {
+		if step.Node != leader {
+			continue
+		}
+		for _, action := range step.Actions {
+			switch action.(type) {
+			case raft.ApplyEntry:
+				applyStep = index
+			case raft.BecameReadReady:
+				readReadyStep = index
+			}
+		}
+	}
+	if applyStep < 0 || readReadyStep != applyStep {
+		t.Fatalf("Leader apply step = %d, read-ready step = %d; want readiness emitted with applied no-op", applyStep, readReadyStep)
+	}
+
+	if err := cluster.FireHeartbeatTimeout(leader); err != nil {
+		t.Fatalf("fire duplicate heartbeat: %v", err)
+	}
+	for _, id := range []raft.NodeID{"node-1", "node-2", "node-3"} {
+		if got := len(cluster.AppliedEntries(id)); got != 1 {
+			t.Fatalf("Node %s applied entries after duplicate replication = %d, want 1", id, got)
+		}
+	}
+}
+
 func TestFixedSeedReproducesEventAndActionSequence(t *testing.T) {
 	first, err := simulation.RunElection(8675309)
 	if err != nil {

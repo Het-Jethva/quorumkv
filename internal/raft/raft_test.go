@@ -77,18 +77,27 @@ func TestCandidateBecomesLeaderWithAQuorum(t *testing.T) {
 	node.Step(raft.HardStatePersisted{PersistenceID: 1})
 
 	actions := node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	noOp := raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}
 	want := []raft.Action{
 		raft.BecameLeader{Term: 1},
 		raft.ResetHeartbeatTimer{},
 		raft.ResetCheckQuorumTimer{},
-		raft.SendHeartbeat{To: "node-2", Heartbeat: raft.Heartbeat{From: "node-1", Term: 1}},
-		raft.SendHeartbeat{To: "node-3", Heartbeat: raft.Heartbeat{From: "node-1", Term: 1}},
+		raft.PersistLogEntries{PersistenceID: 1, Entries: []raft.LogEntry{noOp}},
 	}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("vote response actions = %#v, want %#v", actions, want)
 	}
 	if got := node.State().Role; got != raft.Leader {
 		t.Fatalf("role = %v, want Leader", got)
+	}
+	actions = node.Step(raft.HeartbeatTimeout{})
+	wantBeforePersistence := []raft.Action{
+		raft.ResetHeartbeatTimer{},
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 1}},
+		raft.SendAppendEntries{To: "node-3", Request: raft.AppendEntries{From: "node-1", Term: 1}},
+	}
+	if !reflect.DeepEqual(actions, wantBeforePersistence) {
+		t.Fatalf("heartbeat before no-op persistence = %#v, want no unpersisted entries: %#v", actions, wantBeforePersistence)
 	}
 }
 
@@ -97,19 +106,19 @@ func TestFollowerResetsElectionTimerOnlyForCurrentTermLeaderContact(t *testing.T
 	node.Step(raft.VoteRequest{From: "node-3", Term: 2})
 	node.Step(raft.HardStatePersisted{PersistenceID: 1})
 
-	actions := node.Step(raft.Heartbeat{From: "node-1", Term: 1})
-	wantStale := []raft.Action{raft.SendHeartbeatResponse{
+	actions := node.Step(raft.AppendEntries{From: "node-1", Term: 1})
+	wantStale := []raft.Action{raft.SendAppendEntriesResponse{
 		To:       "node-1",
-		Response: raft.HeartbeatResponse{From: "node-2", Term: 2, Granted: false},
+		Response: raft.AppendEntriesResponse{From: "node-2", Term: 2, Success: false},
 	}}
 	if !reflect.DeepEqual(actions, wantStale) {
 		t.Fatalf("stale heartbeat actions = %#v, want %#v", actions, wantStale)
 	}
 
-	actions = node.Step(raft.Heartbeat{From: "node-1", Term: 2})
+	actions = node.Step(raft.AppendEntries{From: "node-1", Term: 2})
 	wantCurrent := []raft.Action{
 		raft.ResetElectionTimer{},
-		raft.SendHeartbeatResponse{To: "node-1", Response: raft.HeartbeatResponse{From: "node-2", Term: 2, Granted: true}},
+		raft.SendAppendEntriesResponse{To: "node-1", Response: raft.AppendEntriesResponse{From: "node-2", Term: 2, Success: true}},
 	}
 	if !reflect.DeepEqual(actions, wantCurrent) {
 		t.Fatalf("current-Term heartbeat actions = %#v, want %#v", actions, wantCurrent)
@@ -125,14 +134,120 @@ func TestLeaderSendsPeriodicHeartbeats(t *testing.T) {
 	node.Step(raft.PreVoteResponse{From: "node-2", Term: 1, Granted: true})
 	node.Step(raft.HardStatePersisted{PersistenceID: 1})
 	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
 
 	actions := node.Step(raft.HeartbeatTimeout{})
+	noOp := raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}
 	want := []raft.Action{
 		raft.ResetHeartbeatTimer{},
-		raft.SendHeartbeat{To: "node-2", Heartbeat: raft.Heartbeat{From: "node-1", Term: 1}},
-		raft.SendHeartbeat{To: "node-3", Heartbeat: raft.Heartbeat{From: "node-1", Term: 1}},
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{noOp}}},
+		raft.SendAppendEntries{To: "node-3", Request: raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{noOp}}},
 	}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("heartbeat timeout actions = %#v, want %#v", actions, want)
+	}
+}
+
+func TestFollowerValidatesPreviousPositionAndAcknowledgesOnlyAfterPersistence(t *testing.T) {
+	node := raft.NewNode("node-2", []raft.NodeID{"node-1", "node-3"})
+	node.Step(raft.VoteRequest{From: "node-1", Term: 1})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+
+	actions := node.Step(raft.AppendEntries{From: "node-1", Term: 1, PrevLogIndex: 1, PrevLogTerm: 1})
+	wantRejected := []raft.Action{
+		raft.ResetElectionTimer{},
+		raft.SendAppendEntriesResponse{To: "node-1", Response: raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: false}},
+	}
+	if !reflect.DeepEqual(actions, wantRejected) {
+		t.Fatalf("mismatched append actions = %#v, want %#v", actions, wantRejected)
+	}
+
+	entry := raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}
+	actions = node.Step(raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{entry}})
+	wantPersistence := []raft.Action{
+		raft.ResetElectionTimer{},
+		raft.PersistLogEntries{PersistenceID: 1, Entries: []raft.LogEntry{entry}},
+	}
+	if !reflect.DeepEqual(actions, wantPersistence) {
+		t.Fatalf("accepted append actions = %#v, want %#v", actions, wantPersistence)
+	}
+	actions = node.Step(raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{entry}})
+	if want := []raft.Action{raft.ResetElectionTimer{}}; !reflect.DeepEqual(actions, want) {
+		t.Fatalf("duplicate before persistence actions = %#v, want no premature acknowledgement: %#v", actions, want)
+	}
+
+	actions = node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	wantAcknowledgement := []raft.Action{raft.SendAppendEntriesResponse{
+		To:       "node-1",
+		Response: raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1},
+	}}
+	if !reflect.DeepEqual(actions, wantAcknowledgement) {
+		t.Fatalf("persistence completion actions = %#v, want %#v", actions, wantAcknowledgement)
+	}
+}
+
+func TestCommittedEntriesApplyOnceInOrder(t *testing.T) {
+	node := raft.NewNode("node-2", []raft.NodeID{"node-1", "node-3"})
+	entry := raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}
+	node.Step(raft.AppendEntries{From: "node-1", Term: 1, Entries: []raft.LogEntry{entry}, LeaderCommit: 1})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+	actions := node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+	want := []raft.Action{
+		raft.ApplyEntry{Entry: entry},
+		raft.SendAppendEntriesResponse{To: "node-1", Response: raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1}},
+	}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("durable commit actions = %#v, want %#v", actions, want)
+	}
+
+	actions = node.Step(raft.AppendEntries{From: "node-1", Term: 1, PrevLogIndex: 1, PrevLogTerm: 1, LeaderCommit: 1})
+	wantDuplicate := []raft.Action{
+		raft.ResetElectionTimer{},
+		raft.SendAppendEntriesResponse{To: "node-1", Response: raft.AppendEntriesResponse{From: "node-2", Term: 1, Success: true, MatchIndex: 1}},
+	}
+	if !reflect.DeepEqual(actions, wantDuplicate) {
+		t.Fatalf("duplicate commit actions = %#v, want no second apply: %#v", actions, wantDuplicate)
+	}
+	if state := node.State(); state.LastApplied != 1 || state.CommitIndex != 1 {
+		t.Fatalf("state after duplicate commit = %#v, want applied and committed through 1", state)
+	}
+}
+
+func TestLeaderCommitsDirectlyOnlyAnEntryFromItsCurrentTerm(t *testing.T) {
+	node := raft.NewNode("node-1", []raft.NodeID{"node-2", "node-3"})
+	node.Step(raft.ElectionTimeout{})
+	node.Step(raft.PreVoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.HardStatePersisted{PersistenceID: 1})
+	node.Step(raft.VoteResponse{From: "node-2", Term: 1, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 1})
+
+	node.Step(raft.VoteRequest{From: "node-2", Term: 2, LastLogIndex: 1, LastLogTerm: 1})
+	node.Step(raft.HardStatePersisted{PersistenceID: 2})
+	node.Step(raft.ElectionTimeout{})
+	node.Step(raft.PreVoteResponse{From: "node-2", Term: 3, CurrentTerm: 2, Granted: true})
+	node.Step(raft.HardStatePersisted{PersistenceID: 3})
+	node.Step(raft.VoteResponse{From: "node-2", Term: 3, Granted: true})
+	node.Step(raft.LogEntriesPersisted{PersistenceID: 2})
+
+	actions := node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 3, Success: true, MatchIndex: 1})
+	if len(actions) != 0 || node.State().CommitIndex != 0 {
+		t.Fatalf("old-Term quorum response actions = %#v, state = %#v; want no direct commit", actions, node.State())
+	}
+	actions = node.Step(raft.AppendEntriesResponse{From: "node-2", Term: 3, Success: true, MatchIndex: 2})
+	if state := node.State(); state.CommitIndex != 2 || state.LastApplied != 2 || !state.ReadReady {
+		t.Fatalf("current-Term quorum state = %#v, want committed and ready through 2", state)
+	}
+	want := []raft.Action{
+		raft.ApplyEntry{Entry: raft.LogEntry{Index: 1, Term: 1, Type: raft.EntryNoOp}},
+		raft.ApplyEntry{Entry: raft.LogEntry{Index: 2, Term: 3, Type: raft.EntryNoOp}},
+		raft.BecameReadReady{Term: 3},
+		raft.SendAppendEntries{To: "node-2", Request: raft.AppendEntries{From: "node-1", Term: 3, PrevLogIndex: 2, PrevLogTerm: 3, LeaderCommit: 2}},
+		raft.SendAppendEntries{To: "node-3", Request: raft.AppendEntries{From: "node-1", Term: 3, Entries: []raft.LogEntry{
+			{Index: 1, Term: 1, Type: raft.EntryNoOp},
+			{Index: 2, Term: 3, Type: raft.EntryNoOp},
+		}, LeaderCommit: 2}},
+	}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("current-Term quorum actions = %#v, want %#v", actions, want)
 	}
 }

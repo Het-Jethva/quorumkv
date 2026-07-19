@@ -22,6 +22,20 @@ type Event interface{ isEvent() }
 // Action is one effect for the runtime to perform outside the Raft core.
 type Action interface{ isAction() }
 
+// EntryType identifies the replicated command carried by a log entry.
+type EntryType uint8
+
+const (
+	EntryNoOp EntryType = iota
+)
+
+// LogEntry is one position in the replicated Raft log.
+type LogEntry struct {
+	Index uint64
+	Term  uint64
+	Type  EntryType
+}
+
 // ElectionTimeout reports that the runtime's election timer fired.
 type ElectionTimeout struct{}
 
@@ -41,6 +55,11 @@ func (CheckQuorumTimeout) isEvent() {}
 type HardStatePersisted struct{ PersistenceID uint64 }
 
 func (HardStatePersisted) isEvent() {}
+
+// LogEntriesPersisted reports that appended log entries are durable.
+type LogEntriesPersisted struct{ PersistenceID uint64 }
+
+func (LogEntriesPersisted) isEvent() {}
 
 // PreVoteRequest checks whether an election for Term would be viable without
 // changing any Node's current Term or durable vote.
@@ -82,23 +101,28 @@ type VoteResponse struct {
 
 func (VoteResponse) isEvent() {}
 
-// Heartbeat is current Leader contact. Log replication will extend this
-// message in a later slice.
-type Heartbeat struct {
-	From NodeID
-	Term uint64
+// AppendEntries carries ordered log entries and also serves as a heartbeat
+// when Entries is empty.
+type AppendEntries struct {
+	From         NodeID
+	Term         uint64
+	PrevLogIndex uint64
+	PrevLogTerm  uint64
+	Entries      []LogEntry
+	LeaderCommit uint64
 }
 
-func (Heartbeat) isEvent() {}
+func (AppendEntries) isEvent() {}
 
-// HeartbeatResponse reports that a peer heard from a Leader in a Term.
-type HeartbeatResponse struct {
-	From    NodeID
-	Term    uint64
-	Granted bool
+// AppendEntriesResponse reports the durable replicated prefix of a Follower.
+type AppendEntriesResponse struct {
+	From       NodeID
+	Term       uint64
+	Success    bool
+	MatchIndex uint64
 }
 
-func (HeartbeatResponse) isEvent() {}
+func (AppendEntriesResponse) isEvent() {}
 
 // PersistHardState asks the runtime to durably store the current Term and vote.
 type PersistHardState struct {
@@ -108,6 +132,14 @@ type PersistHardState struct {
 }
 
 func (PersistHardState) isAction() {}
+
+// PersistLogEntries asks the runtime to append and sync entries in order.
+type PersistLogEntries struct {
+	PersistenceID uint64
+	Entries       []LogEntry
+}
+
+func (PersistLogEntries) isAction() {}
 
 // SendPreVoteRequest sends a pre-vote request to one peer.
 type SendPreVoteRequest struct {
@@ -141,21 +173,21 @@ type SendVoteResponse struct {
 
 func (SendVoteResponse) isAction() {}
 
-// SendHeartbeat sends Leader contact to one peer.
-type SendHeartbeat struct {
-	To        NodeID
-	Heartbeat Heartbeat
+// SendAppendEntries sends replication or heartbeat traffic to one peer.
+type SendAppendEntries struct {
+	To      NodeID
+	Request AppendEntries
 }
 
-func (SendHeartbeat) isAction() {}
+func (SendAppendEntries) isAction() {}
 
-// SendHeartbeatResponse acknowledges or rejects Leader contact.
-type SendHeartbeatResponse struct {
+// SendAppendEntriesResponse acknowledges or rejects one append request.
+type SendAppendEntriesResponse struct {
 	To       NodeID
-	Response HeartbeatResponse
+	Response AppendEntriesResponse
 }
 
-func (SendHeartbeatResponse) isAction() {}
+func (SendAppendEntriesResponse) isAction() {}
 
 // ResetElectionTimer asks the runtime to choose and schedule a new randomized
 // election timeout.
@@ -183,6 +215,16 @@ type LostLeadership struct{ Term uint64 }
 
 func (LostLeadership) isAction() {}
 
+// ApplyEntry asks the runtime to apply one newly committed entry.
+type ApplyEntry struct{ Entry LogEntry }
+
+func (ApplyEntry) isAction() {}
+
+// BecameReadReady reports that the Leader's current-Term no-op is applied.
+type BecameReadReady struct{ Term uint64 }
+
+func (BecameReadReady) isAction() {}
+
 // State is a read-only snapshot used by runtimes and deterministic assertions.
 type State struct {
 	ID           NodeID
@@ -192,6 +234,9 @@ type State struct {
 	LeaderID     NodeID
 	LastLogIndex uint64
 	LastLogTerm  uint64
+	CommitIndex  uint64
+	LastApplied  uint64
+	ReadReady    bool
 }
 
 type pendingPersistence struct {
@@ -200,28 +245,51 @@ type pendingPersistence struct {
 	after    []Action
 }
 
+type logPersistencePurpose uint8
+
+const (
+	persistLeaderNoOp logPersistencePurpose = iota
+	persistFollowerAppend
+)
+
+type pendingLogPersistence struct {
+	purpose      logPersistencePurpose
+	term         uint64
+	leader       NodeID
+	lastIndex    uint64
+	leaderCommit uint64
+}
+
 // Node consumes one event at a time and emits effects without performing I/O.
 type Node struct {
-	id           NodeID
-	peers        []NodeID
-	role         Role
-	term         uint64
-	votedFor     NodeID
-	leaderID     NodeID
-	lastLogIndex uint64
-	lastLogTerm  uint64
-	votes        map[NodeID]struct{}
-	preVotes     map[NodeID]struct{}
-	activePeers  map[NodeID]struct{}
+	id              NodeID
+	peers           []NodeID
+	role            Role
+	term            uint64
+	votedFor        NodeID
+	leaderID        NodeID
+	lastLogIndex    uint64
+	lastLogTerm     uint64
+	durableLogIndex uint64
+	log             []LogEntry
+	commitIndex     uint64
+	lastApplied     uint64
+	readReady       bool
+	votes           map[NodeID]struct{}
+	preVotes        map[NodeID]struct{}
+	activePeers     map[NodeID]struct{}
+	matchIndex      map[NodeID]uint64
 
 	// recentLeaderContact is cleared only when the election timer fires. It
 	// prevents a healthy Follower from helping an isolated peer disrupt a Leader.
 	recentLeaderContact bool
 
-	durableTerm     uint64
-	durableVotedFor NodeID
-	nextPersistence uint64
-	pending         map[uint64]pendingPersistence
+	durableTerm        uint64
+	durableVotedFor    NodeID
+	nextPersistence    uint64
+	pending            map[uint64]pendingPersistence
+	nextLogPersistence uint64
+	pendingLog         map[uint64]pendingLogPersistence
 }
 
 // NewNode creates a Follower with an empty log. Peers must exclude id.
@@ -235,7 +303,9 @@ func NewNode(id NodeID, peers []NodeID) *Node {
 		votes:       make(map[NodeID]struct{}),
 		preVotes:    make(map[NodeID]struct{}),
 		activePeers: make(map[NodeID]struct{}),
+		matchIndex:  make(map[NodeID]uint64),
 		pending:     make(map[uint64]pendingPersistence),
+		pendingLog:  make(map[uint64]pendingLogPersistence),
 	}
 }
 
@@ -249,6 +319,9 @@ func (n *Node) State() State {
 		LeaderID:     n.leaderID,
 		LastLogIndex: n.lastLogIndex,
 		LastLogTerm:  n.lastLogTerm,
+		CommitIndex:  n.commitIndex,
+		LastApplied:  n.lastApplied,
+		ReadReady:    n.readReady,
 	}
 }
 
@@ -263,6 +336,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.checkQuorum()
 	case HardStatePersisted:
 		return n.hardStatePersisted(event)
+	case LogEntriesPersisted:
+		return n.logEntriesPersisted(event)
 	case PreVoteRequest:
 		return n.handlePreVoteRequest(event)
 	case PreVoteResponse:
@@ -271,10 +346,10 @@ func (n *Node) Step(event Event) []Action {
 		return n.handleVoteRequest(event)
 	case VoteResponse:
 		return n.handleVoteResponse(event)
-	case Heartbeat:
-		return n.handleHeartbeat(event)
-	case HeartbeatResponse:
-		return n.handleHeartbeatResponse(event)
+	case AppendEntries:
+		return n.handleAppendEntries(event)
+	case AppendEntriesResponse:
+		return n.handleAppendEntriesResponse(event)
 	default:
 		return nil
 	}
@@ -325,6 +400,7 @@ func (n *Node) startElection() []Action {
 	n.term++
 	n.votedFor = n.id
 	n.leaderID = ""
+	n.readReady = false
 	n.votes = map[NodeID]struct{}{n.id: {}}
 
 	after := make([]Action, 0, len(n.peers)+1)
@@ -347,6 +423,33 @@ func (n *Node) hardStatePersisted(event HardStatePersisted) []Action {
 		return nil
 	}
 	return pending.after
+}
+
+func (n *Node) logEntriesPersisted(event LogEntriesPersisted) []Action {
+	pending, ok := n.pendingLog[event.PersistenceID]
+	if !ok {
+		return nil
+	}
+	delete(n.pendingLog, event.PersistenceID)
+	if pending.lastIndex > n.durableLogIndex {
+		n.durableLogIndex = pending.lastIndex
+	}
+
+	switch pending.purpose {
+	case persistLeaderNoOp:
+		if n.role != Leader || n.term != pending.term || n.lastLogIndex < pending.lastIndex {
+			return nil
+		}
+		return n.sendAppendEntries()
+	case persistFollowerAppend:
+		if n.term != pending.term || n.role != Follower || n.leaderID != pending.leader {
+			return nil
+		}
+		actions := n.advanceFollowerCommit(pending.leaderCommit)
+		return append(actions, n.appendEntriesResponse(pending.leader, true, pending.lastIndex)...)
+	default:
+		return nil
+	}
 }
 
 func (n *Node) handleVoteRequest(request VoteRequest) []Action {
@@ -384,53 +487,123 @@ func (n *Node) handleVoteResponse(response VoteResponse) []Action {
 	n.role = Leader
 	n.leaderID = n.id
 	n.activePeers = make(map[NodeID]struct{})
+	n.matchIndex = map[NodeID]uint64{n.id: n.lastLogIndex + 1}
+	n.readReady = false
+	entry := LogEntry{Index: n.lastLogIndex + 1, Term: n.term, Type: EntryNoOp}
+	n.appendEntries([]LogEntry{entry})
 	actions := []Action{BecameLeader{Term: n.term}, ResetHeartbeatTimer{}, ResetCheckQuorumTimer{}}
-	return append(actions, n.sendHeartbeats()...)
+	return append(actions, n.persistLog([]LogEntry{entry}, pendingLogPersistence{
+		purpose:   persistLeaderNoOp,
+		term:      n.term,
+		lastIndex: entry.Index,
+	})...)
 }
 
 func (n *Node) heartbeatRound() []Action {
 	if n.role != Leader {
 		return nil
 	}
-	return append([]Action{ResetHeartbeatTimer{}}, n.sendHeartbeats()...)
+	return append([]Action{ResetHeartbeatTimer{}}, n.sendAppendEntries()...)
 }
 
-func (n *Node) sendHeartbeats() []Action {
+func (n *Node) sendAppendEntries() []Action {
 	actions := make([]Action, 0, len(n.peers))
+	durableLastIndex := min(n.durableLogIndex, n.lastLogIndex)
 	for _, peer := range n.peers {
-		actions = append(actions, SendHeartbeat{To: peer, Heartbeat: Heartbeat{From: n.id, Term: n.term}})
+		nextIndex := n.matchIndex[peer] + 1
+		if nextIndex > durableLastIndex+1 {
+			nextIndex = durableLastIndex + 1
+		}
+		prevIndex := nextIndex - 1
+		request := AppendEntries{
+			From:         n.id,
+			Term:         n.term,
+			PrevLogIndex: prevIndex,
+			PrevLogTerm:  n.termAt(prevIndex),
+			Entries:      n.entriesBetween(nextIndex, durableLastIndex),
+			LeaderCommit: n.commitIndex,
+		}
+		actions = append(actions, SendAppendEntries{To: peer, Request: request})
 	}
 	return actions
 }
 
-func (n *Node) handleHeartbeat(heartbeat Heartbeat) []Action {
-	if heartbeat.Term < n.term {
-		return n.heartbeatResponse(heartbeat.From, false)
+func (n *Node) handleAppendEntries(request AppendEntries) []Action {
+	if request.Term < n.term {
+		return n.appendEntriesResponse(request.From, false, n.lastLogIndex)
 	}
-	termChanged := heartbeat.Term > n.term
+	termChanged := request.Term > n.term
 	if termChanged {
-		n.becomeFollower(heartbeat.Term, heartbeat.From)
+		n.becomeFollower(request.Term, request.From)
 	} else {
 		n.role = Follower
-		n.leaderID = heartbeat.From
+		n.leaderID = request.From
+		n.readReady = false
 	}
 	n.recentLeaderContact = true
-	response := append([]Action{ResetElectionTimer{}}, n.heartbeatResponse(heartbeat.From, true)...)
-	if termChanged {
-		return n.persist(response)
+	after := []Action{ResetElectionTimer{}}
+	if !n.matches(request.PrevLogIndex, request.PrevLogTerm) {
+		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
+		if termChanged {
+			return n.persist(after)
+		}
+		return after
 	}
-	return response
+
+	newEntries, ok := n.unseenEntries(request.PrevLogIndex, request.Entries)
+	if !ok {
+		after = append(after, n.appendEntriesResponse(request.From, false, n.lastLogIndex)...)
+		if termChanged {
+			return n.persist(after)
+		}
+		return after
+	}
+	if len(newEntries) > 0 {
+		n.appendEntries(newEntries)
+		after = append(after, n.persistLog(newEntries, pendingLogPersistence{
+			purpose:      persistFollowerAppend,
+			term:         request.Term,
+			leader:       request.From,
+			lastIndex:    n.lastLogIndex,
+			leaderCommit: request.LeaderCommit,
+		})...)
+	} else {
+		if n.lastLogIndex > n.durableLogIndex {
+			if termChanged {
+				return n.persist(after)
+			}
+			return after
+		}
+		after = append(after, n.advanceFollowerCommit(request.LeaderCommit)...)
+		after = append(after, n.appendEntriesResponse(request.From, true, n.lastLogIndex)...)
+	}
+	if termChanged {
+		return n.persist(after)
+	}
+	return after
 }
 
-func (n *Node) handleHeartbeatResponse(response HeartbeatResponse) []Action {
+func (n *Node) handleAppendEntriesResponse(response AppendEntriesResponse) []Action {
 	if response.Term > n.term {
 		n.becomeFollower(response.Term, "")
 		return n.persist(nil)
 	}
-	if n.role == Leader && response.Term == n.term && response.Granted {
-		n.activePeers[response.From] = struct{}{}
+	if n.role != Leader || response.Term != n.term {
+		return nil
 	}
-	return nil
+	n.activePeers[response.From] = struct{}{}
+	if !response.Success {
+		return nil
+	}
+	if response.MatchIndex > n.matchIndex[response.From] {
+		n.matchIndex[response.From] = response.MatchIndex
+	}
+	oldCommit := n.commitIndex
+	actions := n.advanceLeaderCommit()
+	if n.commitIndex > oldCommit {
+		actions = append(actions, n.sendAppendEntries()...)
+	}
+	return actions
 }
 
 func (n *Node) checkQuorum() []Action {
@@ -457,6 +630,8 @@ func (n *Node) becomeFollower(term uint64, leader NodeID) {
 	n.votes = make(map[NodeID]struct{})
 	n.preVotes = make(map[NodeID]struct{})
 	n.activePeers = make(map[NodeID]struct{})
+	n.matchIndex = make(map[NodeID]uint64)
+	n.readReady = false
 }
 
 func (n *Node) candidateLogIsUpToDate(term, index uint64) bool {
@@ -475,8 +650,13 @@ func (n *Node) voteResponse(to NodeID, granted bool) []Action {
 	return []Action{SendVoteResponse{To: to, Response: VoteResponse{From: n.id, Term: n.term, Granted: granted}}}
 }
 
-func (n *Node) heartbeatResponse(to NodeID, granted bool) []Action {
-	return []Action{SendHeartbeatResponse{To: to, Response: HeartbeatResponse{From: n.id, Term: n.term, Granted: granted}}}
+func (n *Node) appendEntriesResponse(to NodeID, success bool, matchIndex uint64) []Action {
+	return []Action{SendAppendEntriesResponse{To: to, Response: AppendEntriesResponse{
+		From:       n.id,
+		Term:       n.term,
+		Success:    success,
+		MatchIndex: matchIndex,
+	}}}
 }
 
 func (n *Node) persist(after []Action) []Action {
@@ -484,6 +664,97 @@ func (n *Node) persist(after []Action) []Action {
 	id := n.nextPersistence
 	n.pending[id] = pendingPersistence{term: n.term, votedFor: n.votedFor, after: after}
 	return []Action{PersistHardState{PersistenceID: id, Term: n.term, VotedFor: n.votedFor}}
+}
+
+func (n *Node) persistLog(entries []LogEntry, pending pendingLogPersistence) []Action {
+	n.nextLogPersistence++
+	id := n.nextLogPersistence
+	n.pendingLog[id] = pending
+	return []Action{PersistLogEntries{PersistenceID: id, Entries: append([]LogEntry(nil), entries...)}}
+}
+
+func (n *Node) appendEntries(entries []LogEntry) {
+	n.log = append(n.log, entries...)
+	n.lastLogIndex = n.log[len(n.log)-1].Index
+	n.lastLogTerm = n.log[len(n.log)-1].Term
+}
+
+func (n *Node) matches(index, term uint64) bool {
+	return index == 0 && term == 0 || index <= n.lastLogIndex && n.termAt(index) == term
+}
+
+func (n *Node) termAt(index uint64) uint64 {
+	if index == 0 || index > uint64(len(n.log)) {
+		return 0
+	}
+	return n.log[index-1].Term
+}
+
+func (n *Node) entriesBetween(first, last uint64) []LogEntry {
+	if first == 0 || first > last || last > n.lastLogIndex {
+		return nil
+	}
+	return append([]LogEntry(nil), n.log[first-1:last]...)
+}
+
+func (n *Node) unseenEntries(prevIndex uint64, entries []LogEntry) ([]LogEntry, bool) {
+	for offset, entry := range entries {
+		wantIndex := prevIndex + uint64(offset) + 1
+		if entry.Index != wantIndex {
+			return nil, false
+		}
+		if entry.Index <= n.lastLogIndex {
+			if n.termAt(entry.Index) != entry.Term {
+				return nil, false
+			}
+			continue
+		}
+		if entry.Index != n.lastLogIndex+1 {
+			return nil, false
+		}
+		return append([]LogEntry(nil), entries[offset:]...), true
+	}
+	return nil, true
+}
+
+func (n *Node) advanceLeaderCommit() []Action {
+	for index := n.lastLogIndex; index > n.commitIndex; index-- {
+		if n.termAt(index) != n.term {
+			continue
+		}
+		replicated := 1
+		for _, peer := range n.peers {
+			if n.matchIndex[peer] >= index {
+				replicated++
+			}
+		}
+		if replicated >= n.quorum() {
+			n.commitIndex = index
+			return n.applyCommitted()
+		}
+	}
+	return nil
+}
+
+func (n *Node) advanceFollowerCommit(leaderCommit uint64) []Action {
+	if leaderCommit > n.commitIndex {
+		n.commitIndex = min(leaderCommit, n.lastLogIndex)
+	}
+	return n.applyCommitted()
+}
+
+func (n *Node) applyCommitted() []Action {
+	actions := make([]Action, 0, n.commitIndex-n.lastApplied+1)
+	for n.lastApplied < n.commitIndex {
+		n.lastApplied++
+		entry := n.log[n.lastApplied-1]
+		actions = append(actions, ApplyEntry{Entry: entry})
+		if n.role == Leader && !n.readReady && entry.Type == EntryNoOp && entry.Term == n.term {
+			n.readReady = true
+			actions = append(actions, BecameReadReady{Term: n.term})
+		}
+	}
+	return actions
 }
 
 func (n *Node) quorum() int { return (len(n.peers)+1)/2 + 1 }
