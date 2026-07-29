@@ -11,9 +11,8 @@ import (
 type nodeMetrics struct {
 	rpcTotal, rpcErrors                                atomic.Uint64
 	elections, raftRPCs                                atomic.Uint64
-	proposals, clientErrors, clientRetries             atomic.Uint64
+	proposals, clientErrors                            atomic.Uint64
 	walSyncs, snapshots, snapshotInstalls, compactions atomic.Uint64
-	commitLatencyMicros                                atomic.Uint64
 }
 
 func (m *nodeMetrics) observeRPC(err error) {
@@ -33,11 +32,9 @@ func (m *nodeMetrics) handler() http.Handler {
 		writeMetric("raft_rpcs_total", m.raftRPCs.Load())
 		writeMetric("proposals_total", m.proposals.Load())
 		writeMetric("client_errors_total", m.clientErrors.Load())
-		writeMetric("client_retries_total", m.clientRetries.Load())
 		writeMetric("wal_syncs_total", m.walSyncs.Load())
 		writeMetric("snapshots_total", m.snapshots.Load())
 		writeMetric("snapshot_installations_total", m.snapshotInstalls.Load())
 		writeMetric("snapshot_compactions_total", m.compactions.Load())
-		writeMetric("commit_latency_microseconds_total", m.commitLatencyMicros.Load())
 	})
 }

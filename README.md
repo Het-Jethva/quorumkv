@@ -49,14 +49,20 @@ linearizable versus eventual consistency, and the explicit v1 non-goals.
 ## Correctness evidence
 
 The repository currently verifies deterministic Raft transitions, WAL and
-Snapshot recovery, linearizability, seeded fault schedules, and real
-multi-process election, failover, partition, restart, repair, and Snapshot
-scenarios. CI runs formatting, the full Go suite, race detection, vet, static
-analysis, Protobuf validation, and Linux/Windows portable coverage. The public
-project makes no production-readiness claim. A reproducible durable benchmark
-and its raw measured result are in [benchmark/README.md](benchmark/README.md);
-published numbers are local development measurements with hardware and workload
-metadata, not production claims.
+Snapshot recovery, seeded fault schedules, and real multi-process election,
+failover, partition, restart, repair, and Snapshot scenarios. CI runs
+formatting, the full Go suite, race detection, vet, static analysis, Protobuf
+validation, and Linux/Windows portable coverage. The public project makes no
+production-readiness claim. A reproducible durable benchmark and its raw
+measured result are in [benchmark/README.md](benchmark/README.md); published
+numbers are local development measurements with hardware and workload metadata,
+not production claims.
+
+`internal/linearizability` contains a client-side history recorder and a
+sequential-model checker for the data contract. It is unit-tested against
+hand-written histories; it is not yet run against histories recorded from a
+live Cluster, so linearizability is a design claim backed by the Raft read
+path, not a checked property of a recorded run.
 
 ## Replay a deterministic fault schedule
 
