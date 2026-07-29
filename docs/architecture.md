@@ -45,6 +45,16 @@ watches, TTLs, TLS, authentication, authorization, WAN tuning, Byzantine
 fault tolerance, or production-readiness. Plaintext gRPC is intended only for
 trusted development networks.
 
+Client Session deduplication state is retained for the life of the Cluster.
+Closing a Session frees an active-session slot but not its record, because
+that record is what makes a retry return a cached result instead of taking a
+second effect. `active_session_limit` therefore bounds concurrent Sessions
+only: replicated state and every Snapshot grow with the total number of
+Sessions ever opened. A Cluster intended to run indefinitely needs the
+lease-based expiry described in
+[ADR-0006](adr/0006-retain-client-session-state-for-the-life-of-the-cluster.md),
+which v1 does not implement.
+
 ## Failure cases
 
 A Leader crash before append leaves no mutation. A crash after local
