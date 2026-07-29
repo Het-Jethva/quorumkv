@@ -53,6 +53,24 @@ jobs:
       - name: Run public Docker failure demo
         shell: bash
         run: set -o pipefail; sh demo/run.sh 2>&1 | tee artifacts/docker-demo.log
+      # Both durable formats are parsed with explicit offset arithmetic over
+      # lengths that came off disk, on the path a Node takes after a crash.
+      - name: Fuzz the durable decoders
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./internal/snapshot -run FuzzDecode -fuzz FuzzDecode -fuzztime 60s 2>&1 | tee artifacts/fuzz-snapshot.log
+          go test ./internal/wal -run FuzzApplyRecord -fuzz FuzzApplyRecord -fuzztime 60s 2>&1 | tee artifacts/fuzz-wal.log
+      - name: Keep any failing fuzz input
+        if: failure()
+        shell: bash
+        run: |
+          for package in internal/snapshot internal/wal; do
+            if [ -d "$package/testdata/fuzz" ]; then
+              mkdir -p "artifacts/fuzz-corpus/$package"
+              cp -r "$package/testdata/fuzz/." "artifacts/fuzz-corpus/$package/"
+            fi
+          done
       - name: Record a replayable seeded failure trace
         run: go run ./cmd/quorumkvsim -seed 20250308 -steps 400 -trace artifacts/simulation-trace.json
       - name: Upload Linux diagnostics
