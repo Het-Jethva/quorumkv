@@ -17,7 +17,11 @@ import (
 )
 
 const (
-	maxAttempts    = 128
+	maxAttempts = 128
+	// maxLeaderHints bounds how many Leader hints are followed in a row. Nodes
+	// that disagree about the Leader can hint at each other, and an unbounded
+	// chase would spend the whole attempt budget without ever pausing.
+	maxLeaderHints = 8
 	initialBackoff = 25 * time.Millisecond
 	maximumBackoff = 200 * time.Millisecond
 )
@@ -156,6 +160,7 @@ func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServ
 	configuredIndex := 0
 	address := c.addresses[configuredIndex]
 	backoff := initialBackoff
+	hintsFollowed := 0
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		connection, err := c.connection(address)
 		if err != nil {
@@ -165,14 +170,21 @@ func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServ
 		if err == nil {
 			return nil
 		}
-		hint, ok := leaderHint(err)
-		if ok {
+		hint, hinted := leaderHint(err)
+		switch {
+		case hinted && hintsFollowed < maxLeaderHints:
+			hintsFollowed++
 			address = hint
 			continue
-		}
-		if status.Code(err) != codes.Unavailable {
+		case hinted:
+			// The hints ran in a circle, so the Cluster has no settled Leader.
+			// Pause and restart from the configured addresses instead of
+			// chasing a disagreement that only an election can resolve.
+		case status.Code(err) == codes.Unavailable:
+		default:
 			return err
 		}
+		hintsFollowed = 0
 		configuredIndex = (configuredIndex + 1) % len(c.addresses)
 		address = c.addresses[configuredIndex]
 		jitter := time.Duration(rand.Int64N(int64(backoff)/2 + 1))

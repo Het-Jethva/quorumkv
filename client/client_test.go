@@ -166,6 +166,57 @@ func TestPermanentContractErrorsAreNeverRetried(t *testing.T) {
 	}
 }
 
+// TestLeaderHintsAreBoundedWhenNodesDisagree points the Client at two Nodes
+// that each name the other as Leader. Following those hints without a bound
+// spends every attempt instantly; the Client must stop chasing and pause.
+func TestLeaderHintsAreBoundedWhenNodesDisagree(t *testing.T) {
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	second, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		first.Close()
+		t.Fatalf("listen: %v", err)
+	}
+
+	firstServer := &leaderHintServer{leaderAddress: second.Addr().String()}
+	secondServer := &leaderHintServer{leaderAddress: first.Addr().String()}
+	stopFirst := serveClientOn(t, first, firstServer)
+	defer stopFirst()
+	stopSecond := serveClientOn(t, second, secondServer)
+	defer stopSecond()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	cluster := New(first.Addr().String())
+	defer cluster.Close()
+
+	if _, err := cluster.Get(ctx, "key"); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("Get() error = %v, want DeadlineExceeded while paused between hint chases", err)
+	}
+	attempts := int(firstServer.attempts.Load() + secondServer.attempts.Load())
+	if attempts >= maxAttempts {
+		t.Fatalf("Get() made %d attempts within the deadline, want fewer than the %d attempt budget", attempts, maxAttempts)
+	}
+}
+
+type leaderHintServer struct {
+	quorumkvv1.UnimplementedClientServiceServer
+	leaderAddress string
+	attempts      atomic.Int32
+}
+
+func (s *leaderHintServer) Get(context.Context, *quorumkvv1.GetRequest) (*quorumkvv1.GetResponse, error) {
+	s.attempts.Add(1)
+	base := status.New(codes.FailedPrecondition, "not the Leader")
+	withDetails, err := base.WithDetails(&quorumkvv1.NotLeader{LeaderId: "other", LeaderAddress: s.leaderAddress})
+	if err != nil {
+		return nil, base.Err()
+	}
+	return nil, withDetails.Err()
+}
+
 type sequenceErrorServer struct {
 	quorumkvv1.UnimplementedClientServiceServer
 	err      error
@@ -213,6 +264,13 @@ func serveClient(t *testing.T, service quorumkvv1.ClientServiceServer) (string, 
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	return listener.Addr().String(), serveClientOn(t, listener, service)
+}
+
+// serveClientOn serves on an already bound listener so a test can learn every
+// Node address before deciding what those Nodes say about each other.
+func serveClientOn(t *testing.T, listener net.Listener, service quorumkvv1.ClientServiceServer) func() {
+	t.Helper()
 	server := grpc.NewServer()
 	quorumkvv1.RegisterClientServiceServer(server, service)
 	done := make(chan struct{})
@@ -220,7 +278,7 @@ func serveClient(t *testing.T, service quorumkvv1.ClientServiceServer) (string, 
 		defer close(done)
 		_ = server.Serve(listener)
 	}()
-	return listener.Addr().String(), func() {
+	return func() {
 		server.Stop()
 		<-done
 	}
