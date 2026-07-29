@@ -66,3 +66,7 @@ go run ./cmd/quorumkvsim -seed 42 -steps 1000 -trace .traces/seed-42.json
 
 A failed schedule prints its exact replay command and CI retains traces as
 artifacts.
+
+## License
+
+QuorumKV is released under the [MIT License](LICENSE).
