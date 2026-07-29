@@ -26,6 +26,16 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+// newClient returns a Client whose pooled connections are released when the
+// test ends. A Client now holds its connections open, so goleak would observe
+// them if a test dropped one without closing it.
+func newClient(t *testing.T, addresses ...string) *client.Client {
+	t.Helper()
+	cluster := client.New(addresses...)
+	t.Cleanup(func() { _ = cluster.Close() })
+	return cluster
+}
+
 func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T) {
 	members := make(map[string]config.Member, 3)
 	configs := make(map[string]config.Config, 3)
@@ -66,7 +76,7 @@ func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T
 
 	cancel, nodes, results := start()
 	leader := waitForStableLeader(t, members, nil, processTestDeadline)
-	cluster := client.New(append([]string{members[leader].ClientAddress}, addresses...)...)
+	cluster := newClient(t, append([]string{members[leader].ClientAddress}, addresses...)...)
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	sessionID, err := cluster.OpenSession(requestCtx)
 	if err != nil {
@@ -138,7 +148,7 @@ func TestPublicBehaviorSurvivesSnapshotAndCommittedWALSuffixRestart(t *testing.T
 	cancel, _, results = start()
 	defer stop(cancel, results)
 	leader = waitForStableLeader(t, members, nil, processTestDeadline)
-	cluster = client.New(append([]string{members[leader].ClientAddress}, addresses...)...)
+	cluster = newClient(t, append([]string{members[leader].ClientAddress}, addresses...)...)
 	requestCtx, requestCancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer requestCancel()
 	if got, err := cluster.Get(requestCtx, "retained"); err != nil || !bytes.Equal(got, wantValue) {

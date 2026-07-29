@@ -94,7 +94,9 @@ func runDelete(ctx context.Context, output io.Writer, address string, args []str
 	if err != nil || sequence == 0 {
 		return fmt.Errorf("sequence must be a positive base-10 integer")
 	}
-	existed, err := client.New(address).Delete(ctx, sessionID, sequence, args[2])
+	cluster := client.New(address)
+	defer cluster.Close()
+	existed, err := cluster.Delete(ctx, sessionID, sequence, args[2])
 	if err != nil {
 		return fmt.Errorf("DELETE Key %q: %w", args[2], err)
 	}
@@ -109,7 +111,9 @@ func runGet(ctx context.Context, output io.Writer, address string, args []string
 	if len(args) != 1 {
 		return usageError()
 	}
-	value, err := client.New(address).Get(ctx, args[0])
+	cluster := client.New(address)
+	defer cluster.Close()
+	value, err := cluster.Get(ctx, args[0])
 	if err != nil {
 		return fmt.Errorf("GET Key %q: %w", args[0], err)
 	}
@@ -132,7 +136,9 @@ func runSet(ctx context.Context, output io.Writer, address string, args []string
 	if err != nil || sequence == 0 {
 		return fmt.Errorf("sequence must be a positive base-10 integer")
 	}
-	if err := client.New(address).Set(ctx, sessionID, sequence, args[2], []byte(args[3])); err != nil {
+	cluster := client.New(address)
+	defer cluster.Close()
+	if err := cluster.Set(ctx, sessionID, sequence, args[2], []byte(args[3])); err != nil {
 		return fmt.Errorf("SET Key %q: %w", args[2], err)
 	}
 	return json.NewEncoder(output).Encode(struct {
@@ -143,8 +149,10 @@ func runSet(ctx context.Context, output io.Writer, address string, args []string
 }
 
 func runSession(ctx context.Context, output io.Writer, address string, args []string) error {
+	cluster := client.New(address)
+	defer cluster.Close()
 	if len(args) == 1 && args[0] == "open" {
-		sessionID, err := client.New(address).OpenSession(ctx)
+		sessionID, err := cluster.OpenSession(ctx)
 		if err != nil {
 			return fmt.Errorf("open Client Session: %w", err)
 		}
@@ -157,7 +165,7 @@ func runSession(ctx context.Context, output io.Writer, address string, args []st
 		if err != nil {
 			return err
 		}
-		if err := client.New(address).CloseSession(ctx, sessionID); err != nil {
+		if err := cluster.CloseSession(ctx, sessionID); err != nil {
 			return fmt.Errorf("close Client Session %q: %w", args[1], err)
 		}
 		return json.NewEncoder(output).Encode(struct {

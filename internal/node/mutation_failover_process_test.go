@@ -23,6 +23,16 @@ import (
 
 const mutationProcessTestDeadline = 30 * time.Second
 
+// newClient returns a Client whose pooled connections are released when the
+// test ends. A Client now holds its connections open, so goleak would observe
+// them if a test dropped one without closing it.
+func newClient(t *testing.T, addresses ...string) *client.Client {
+	t.Helper()
+	cluster := client.New(addresses...)
+	t.Cleanup(func() { _ = cluster.Close() })
+	return cluster
+}
+
 func TestSetSurvivesLeaderCrashAtEveryMutationBoundary(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -57,17 +67,18 @@ func TestSetSurvivesLeaderCrashAtEveryMutationBoundary(t *testing.T) {
 			leader := waitForMutationLeader(t, members, nil, mutationProcessTestDeadline)
 			addresses := mutationClientAddresses(members, leader)
 			requestCtx, cancel := context.WithTimeout(context.Background(), mutationProcessTestDeadline)
-			sessionID, err := client.New(addresses...).OpenSession(requestCtx)
+			sessionID, err := newClient(t, addresses...).OpenSession(requestCtx)
 			cancel()
 			if err != nil {
 				t.Fatalf("open Client Session: %v", err)
 			}
 
 			setDone := make(chan error, 1)
+			setClient := newClient(t, addresses...)
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), mutationProcessTestDeadline)
 				defer cancel()
-				setDone <- client.New(addresses...).Set(ctx, sessionID, 1, key, []byte("original"))
+				setDone <- setClient.Set(ctx, sessionID, 1, key, []byte("original"))
 			}()
 			waitForMutationMarker(t, marker, mutationProcessTestDeadline)
 			select {
@@ -89,20 +100,20 @@ func TestSetSurvivesLeaderCrashAtEveryMutationBoundary(t *testing.T) {
 
 			replacement := waitForMutationLeader(t, members, map[string]bool{leader: true}, mutationProcessTestDeadline)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			value, err := client.New(mutationClientAddresses(members, replacement)...).Get(ctx, key)
+			value, err := newClient(t, mutationClientAddresses(members, replacement)...).Get(ctx, key)
 			cancel()
 			if err != nil || !bytes.Equal(value, []byte("original")) {
 				t.Fatalf("GET after crash at %s = (%q, %v), want original Value", test.name, value, err)
 			}
 
 			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			err = client.New(members[replacement].ClientAddress).Set(ctx, sessionID, 1, key, []byte("conflicting retry"))
+			err = newClient(t, members[replacement].ClientAddress).Set(ctx, sessionID, 1, key, []byte("conflicting retry"))
 			cancel()
 			if err != nil {
 				t.Fatalf("retry cached mutation result after %s: %v", test.name, err)
 			}
 			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			value, err = client.New(members[replacement].ClientAddress).Get(ctx, key)
+			value, err = newClient(t, members[replacement].ClientAddress).Get(ctx, key)
 			cancel()
 			if err != nil || !bytes.Equal(value, []byte("original")) {
 				t.Fatalf("GET after conflicting duplicate at %s = (%q, %v), want cached original result", test.name, value, err)

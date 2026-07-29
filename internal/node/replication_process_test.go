@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Het-Jethva/quorumkv/client"
 	"github.com/Het-Jethva/quorumkv/internal/config"
 	"github.com/Het-Jethva/quorumkv/internal/raft"
 	"github.com/Het-Jethva/quorumkv/internal/wal"
@@ -59,7 +58,7 @@ func TestThreeProcessesRepairFollowerAfterPeerPartitionHeals(t *testing.T) {
 	leader := waitForStableLeader(t, actualMembers, nil, processTestDeadline)
 	stale := memberIDForAddress(t, actualMembers, memberOtherThan(t, actualMembers, map[string]bool{leader: true}).ClientAddress)
 	ctx, cancel := context.WithTimeout(context.Background(), processTestDeadline)
-	sessionID, err := client.New(actualMembers[leader].ClientAddress).OpenSession(ctx)
+	sessionID, err := newClient(t, actualMembers[leader].ClientAddress).OpenSession(ctx)
 	cancel()
 	if err != nil {
 		t.Fatalf("open Client Session: %v", err)
@@ -68,7 +67,7 @@ func TestThreeProcessesRepairFollowerAfterPeerPartitionHeals(t *testing.T) {
 	proxies[stale].setEnabled(false)
 	for sequence, value := range []string{"first", "second", "third"} {
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		err = client.New(actualMembers[leader].ClientAddress).Set(ctx, sessionID, uint64(sequence+1), "partitioned", []byte(value))
+		err = newClient(t, actualMembers[leader].ClientAddress).Set(ctx, sessionID, uint64(sequence+1), "partitioned", []byte(value))
 		cancel()
 		if err != nil {
 			t.Fatalf("SET sequence %d while Follower is partitioned: %v", sequence+1, err)

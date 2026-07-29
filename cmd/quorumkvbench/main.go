@@ -149,6 +149,13 @@ func validateOptions(opts options) error {
 
 func measure(ctx context.Context, opts options) (report, error) {
 	clients := make([]*client.Client, opts.concurrency)
+	defer func() {
+		for _, worker := range clients {
+			if worker != nil {
+				_ = worker.Close()
+			}
+		}
+	}()
 	sessions := make([][16]byte, opts.concurrency)
 	for index := range clients {
 		clients[index] = client.New(opts.addresses...)

@@ -3,8 +3,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
@@ -21,14 +23,60 @@ const (
 )
 
 // Client starts at one configured Node and follows typed Leader hints directly.
+// It keeps one connection per Node address it has reached, so a command does
+// not pay connection setup. A Client is safe for concurrent use and must be
+// closed to release those connections.
 type Client struct {
 	addresses []string
+
+	mu          sync.Mutex
+	connections map[string]*grpc.ClientConn
+	closed      bool
 }
 
 // New creates a Client that starts at the first address and falls back across
 // the remaining configured Node addresses.
 func New(addresses ...string) *Client {
-	return &Client{addresses: append([]string(nil), addresses...)}
+	return &Client{
+		addresses:   append([]string(nil), addresses...),
+		connections: make(map[string]*grpc.ClientConn),
+	}
+}
+
+// Close releases every connection this Client opened. A closed Client cannot
+// be reused.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	var first error
+	for address, connection := range c.connections {
+		if err := connection.Close(); err != nil && first == nil {
+			first = fmt.Errorf("close connection to Node at %q: %w", address, err)
+		}
+		delete(c.connections, address)
+	}
+	return first
+}
+
+// connection returns the Client's connection to address, dialing once. A
+// Leader hint may name a Node that is not in the configured address list, so
+// connections are keyed by address rather than by configured position.
+func (c *Client) connection(address string) (*grpc.ClientConn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("Client is closed")
+	}
+	if connection, ok := c.connections[address]; ok {
+		return connection, nil
+	}
+	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("connect to Node at %q: %w", address, err)
+	}
+	c.connections[address] = connection
+	return connection, nil
 }
 
 // OpenSession creates a replicated Client Session and returns its 128-bit identity.
@@ -109,16 +157,12 @@ func (c *Client) withLeader(ctx context.Context, call func(quorumkvv1.ClientServ
 	address := c.addresses[configuredIndex]
 	backoff := initialBackoff
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		connection, err := c.connection(address)
 		if err != nil {
-			return fmt.Errorf("connect to Node at %q: %w", address, err)
+			return err
 		}
 		err = call(quorumkvv1.NewClientServiceClient(connection))
-		closeErr := connection.Close()
 		if err == nil {
-			if closeErr != nil {
-				return fmt.Errorf("close connection to Node at %q: %w", address, closeErr)
-			}
 			return nil
 		}
 		hint, ok := leaderHint(err)

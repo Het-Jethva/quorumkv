@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Het-Jethva/quorumkv/client"
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
 	"github.com/Het-Jethva/quorumkv/internal/cli"
 	"github.com/Het-Jethva/quorumkv/internal/config"
@@ -61,7 +60,7 @@ func TestLostSetResponseIsDeduplicatedAfterLeaderFailover(t *testing.T) {
 
 	leader := waitForStableLeader(t, members, nil, processTestDeadline)
 	requestCtx, cancel := context.WithTimeout(context.Background(), processTestDeadline)
-	sessionID, err := client.New(members[leader].ClientAddress).OpenSession(requestCtx)
+	sessionID, err := newClient(t, members[leader].ClientAddress).OpenSession(requestCtx)
 	cancel()
 	if err != nil {
 		t.Fatalf("open Client Session: %v", err)
@@ -87,7 +86,7 @@ func TestLostSetResponseIsDeduplicatedAfterLeaderFailover(t *testing.T) {
 	delete(processes, leader)
 	replacement := waitForStableLeader(t, members, map[string]bool{leader: true}, processTestDeadline)
 	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	err = client.New(members[replacement].ClientAddress).Set(requestCtx, sessionID, 1, "deduplicated", []byte("different retry payload"))
+	err = newClient(t, members[replacement].ClientAddress).Set(requestCtx, sessionID, 1, "deduplicated", []byte("different retry payload"))
 	cancel()
 	if err != nil {
 		t.Fatalf("retry lost-response SET through replacement Leader: %v", err)
@@ -100,10 +99,11 @@ func TestLostSetResponseIsDeduplicatedAfterLeaderFailover(t *testing.T) {
 	processes[remainingFollowerID].stop()
 	delete(processes, remainingFollowerID)
 	firstDone := make(chan error, 1)
+	pendingClient := newClient(t, members[replacement].ClientAddress)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		firstDone <- client.New(members[replacement].ClientAddress).Set(ctx, sessionID, 2, "pending", []byte("value"))
+		firstDone <- pendingClient.Set(ctx, sessionID, 2, "pending", []byte("value"))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	connection, err = grpc.NewClient(members[replacement].ClientAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -227,7 +227,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 
 	first := waitForSingleLeader(t, members, nil, processTestDeadline)
 	initialFollower := memberOtherThan(t, members, map[string]bool{first: true})
-	sessionClient := client.New(initialFollower.ClientAddress)
+	sessionClient := newClient(t, initialFollower.ClientAddress)
 	requestCtx, cancel := context.WithTimeout(context.Background(), processTestDeadline)
 	sessionID, err := sessionClient.OpenSession(requestCtx)
 	cancel()
@@ -313,7 +313,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 		t.Fatalf("DELETE existing Key output = %q, error = %v; want existed=true", deleteOutput, err)
 	}
 	requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	_, err = client.New(replacementFollower.ClientAddress).Get(requestCtx, "empty")
+	_, err = newClient(t, replacementFollower.ClientAddress).Get(requestCtx, "empty")
 	cancel()
 	if status.Code(err) != codes.NotFound || !hasKeyNotFoundDetail(err, "empty") {
 		t.Fatalf("GET deleted Key error = %v, want typed NotFound", err)
@@ -322,7 +322,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 	if err != nil || !strings.Contains(deleteOutput, `"existed":false`) {
 		t.Fatalf("DELETE missing Key output = %q, error = %v; want existed=false", deleteOutput, err)
 	}
-	sessionClient = client.New(replacementFollower.ClientAddress)
+	sessionClient = newClient(t, replacementFollower.ClientAddress)
 	requestCtx, cancel = context.WithTimeout(context.Background(), processTestDeadline)
 	err = sessionClient.CloseSession(requestCtx, sessionID)
 	cancel()
@@ -348,7 +348,7 @@ func TestThreeProcessesSetThroughCLIAndElectReplacementLeader(t *testing.T) {
 		t.Fatalf("SET without Quorum output = %q, error = %v; want timeout or Unavailable without success", output, err)
 	}
 	requestCtx, cancel = context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	_, err = client.New(members[replacement].ClientAddress).Get(requestCtx, "opaque")
+	_, err = newClient(t, members[replacement].ClientAddress).Get(requestCtx, "opaque")
 	cancel()
 	if err == nil {
 		t.Fatal("GET from minority partition succeeded, want unavailable or deadline failure")

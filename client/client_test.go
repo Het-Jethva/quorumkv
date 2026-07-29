@@ -28,7 +28,9 @@ func TestGetFallsBackAcrossConfiguredNodes(t *testing.T) {
 	defer stop()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	value, err := New(unavailableAddress, availableAddress).Get(ctx, "opaque")
+	cluster := New(unavailableAddress, availableAddress)
+	defer cluster.Close()
+	value, err := cluster.Get(ctx, "opaque")
 	if err != nil {
 		t.Fatalf("Get() through fallback Node: %v", err)
 	}
@@ -68,7 +70,9 @@ func TestSetDoesNotRetrySequenceErrors(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			err = New(address).Set(ctx, [16]byte{1}, 1, "key", []byte("value"))
+			cluster := New(address)
+			defer cluster.Close()
+			err = cluster.Set(ctx, [16]byte{1}, 1, "key", []byte("value"))
 			if status.Code(err) != codes.FailedPrecondition {
 				t.Fatalf("Set() error = %v, want FailedPrecondition", err)
 			}
@@ -150,7 +154,9 @@ func TestPermanentContractErrorsAreNeverRetried(t *testing.T) {
 			defer stop()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if err := test.invoke(ctx, New(address)); err == nil {
+			cluster := New(address)
+			defer cluster.Close()
+			if err := test.invoke(ctx, cluster); err == nil {
 				t.Fatal("command succeeded, want permanent contract error")
 			}
 			if attempts := server.attempts.Load(); attempts != 1 {

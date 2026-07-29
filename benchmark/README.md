@@ -31,8 +31,24 @@ threads, 15.3 GiB RAM, NVMe SSD, Go 1.26.5, with three local processes,
 
 | Command | Throughput | p50 | p95 | p99 |
 | --- | ---: | ---: | ---: | ---: |
-| SET | 715.1 ops/s | 11.03 ms | 14.37 ms | 15.50 ms |
-| GET | 1,028.1 ops/s | 7.63 ms | 10.14 ms | 11.52 ms |
+| SET | 932.4 ops/s | 8.04 ms | 10.98 ms | 18.66 ms |
+| GET | 1,281.7 ops/s | 6.00 ms | 7.31 ms | 14.98 ms |
+
+The published file is one run. A second run under identical conditions gave
+1,025.8 SET ops/s and 1,289.2 GET ops/s, so SET throughput and its tail vary
+noticeably between runs while GET is stable. Treat single-run tail latencies
+accordingly.
+
+These numbers replace an earlier measurement taken before `client.Client`
+reused connections, when every command paid TCP and HTTP/2 setup. Pooling
+raised SET throughput about 30% and GET about 25%.
+
+GET latency remains dominated by the Cluster, not the client. At eight
+concurrent workers the amortized cost is roughly 0.78 ms per read while p50 is
+about 6 ms, which is what one expects when reads are serialized: each
+linearizable read needs its own Quorum confirmation round, and the Leader
+allows only one in-flight replication request per Follower, so concurrent reads
+queue behind one another rather than sharing a round.
 
 These are local development measurements, not production claims. Results are
 sensitive to filesystem, process placement, payload, and concurrency; compare
