@@ -1,6 +1,8 @@
 package linearizability
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -62,6 +64,42 @@ func TestCheckFindsNonLinearizableHistory(t *testing.T) {
 	}
 	if err := Check(history); err == nil {
 		t.Fatal("Check() accepted a deliberately faulty history")
+	}
+}
+
+func TestCheckDistinguishesAViolationFromAnExhaustedBudget(t *testing.T) {
+	base := time.Unix(0, 0)
+	session := [16]byte{7}
+	// Every operation overlaps every other, so the search has many candidate
+	// orders to enumerate and no completed operation constrains the rest.
+	history := make([]Operation, 0, 12)
+	for index := range cap(history) {
+		history = append(history, op(Set, session, uint64(index+1), fmt.Sprintf("key-%d", index), []byte("value"), base, base.Add(time.Minute), Outcome{}))
+	}
+
+	if err := Check(history); err != nil {
+		t.Fatalf("Check() over a legal concurrent history = %v", err)
+	}
+	err := CheckWithin(history, 4)
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("CheckWithin() with a tiny budget = %v, want ErrBudgetExhausted", err)
+	}
+
+	// A real violation must remain reportable rather than being reported as an
+	// exhausted budget, otherwise the CI signal cannot be trusted.
+	violation := []Operation{
+		op(Set, session, 1, "key", []byte("value"), base, base.Add(time.Second), Outcome{}),
+		op(Get, session, 0, "key", nil, base.Add(2*time.Second), base.Add(3*time.Second), Outcome{Error: "not_found"}),
+	}
+	err = Check(violation)
+	if err == nil || errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("Check() over a faulty history = %v, want a linearizability violation", err)
+	}
+}
+
+func TestCheckRejectsAnUnusableBudget(t *testing.T) {
+	if err := CheckWithin(nil, 0); err == nil {
+		t.Fatal("CheckWithin() accepted a zero step budget")
 	}
 }
 

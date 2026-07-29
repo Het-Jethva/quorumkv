@@ -4,6 +4,7 @@ package linearizability
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -79,11 +80,42 @@ func (h *History) Operations() []Operation {
 	return result
 }
 
-// Check reports whether the history has a legal sequential explanation. A
-// pending operation may be omitted, which models a timeout whose result is
-// unknown. Repeating a Session/Sequence is the same logical mutation from the
-// model's perspective and returns the cached mutation result.
-func Check(history []Operation) error {
+// ErrBudgetExhausted reports that the search stopped before it could either
+// find a legal sequential explanation or rule one out. It is deliberately
+// distinct from a proven violation: the history is unexplained, not proven
+// wrong. Callers must treat it as a failure, never as a pass.
+//
+// The two outcomes are far apart in cost, which is what makes exhaustion a
+// trustworthy signal. A history the Cluster can actually produce is matched
+// almost greedily, because each operation's recorded outcome plus the
+// real-time order of completed operations leaves only one viable placement:
+// measured histories of 150 and 360 operations both linearized in exactly one
+// step per operation. Refuting a history is the opposite case and needs the
+// whole space, which is only feasible for roughly a dozen overlapping
+// operations. So at useful sizes a genuine violation exhausts the budget
+// rather than being refuted, while a correct history finishes in about len
+// steps. Exhaustion therefore means "no explanation was found with several
+// orders of magnitude more search than a correct history needs".
+var ErrBudgetExhausted = errors.New("linearizability search exhausted its step budget")
+
+// DefaultBudget bounds the search performed by Check. It is set far above the
+// roughly one-step-per-operation a correct history costs, so that exhausting
+// it is evidence about the history rather than about the budget.
+const DefaultBudget = 2_000_000
+
+// Check reports whether the history has a legal sequential explanation, using
+// DefaultBudget. A pending operation may be omitted, which models a timeout
+// whose result is unknown. Repeating a Session/Sequence is the same logical
+// mutation from the model's perspective and returns the cached mutation result.
+func Check(history []Operation) error { return CheckWithin(history, DefaultBudget) }
+
+// CheckWithin is Check with an explicit step budget. It returns
+// ErrBudgetExhausted when budget candidate placements are consumed before the
+// search settles.
+func CheckWithin(history []Operation, budget int) error {
+	if budget < 1 {
+		return fmt.Errorf("step budget must be at least 1, got %d", budget)
+	}
 	for _, operation := range history {
 		if operation.Invoke.IsZero() {
 			return fmt.Errorf("operation has no invocation time")
@@ -92,13 +124,25 @@ func Check(history []Operation) error {
 			return fmt.Errorf("operation completed before invocation")
 		}
 	}
-	model := newModel()
-	used := make([]bool, len(history))
-	if checkOrder(history, used, model, 0) {
+	search := &search{history: history, used: make([]bool, len(history)), budget: budget}
+	if search.order(newModel(), 0) {
 		return nil
+	}
+	if search.exhausted() {
+		return fmt.Errorf("%w: %d steps over %d operations found no sequential explanation, where a legal history costs about %d", ErrBudgetExhausted, search.steps, len(history), len(history))
 	}
 	return fmt.Errorf("history is not linearizable")
 }
+
+// search carries the backtracking state for one CheckWithin call.
+type search struct {
+	history []Operation
+	used    []bool
+	steps   int
+	budget  int
+}
+
+func (s *search) exhausted() bool { return s.steps >= s.budget }
 
 type sessionState struct {
 	last   uint64
@@ -124,35 +168,49 @@ func (m model) clone() model {
 	return copyModel
 }
 
-func checkOrder(history []Operation, used []bool, state model, placed int) bool {
-	if placed == len(history) {
+func (s *search) order(state model, placed int) bool {
+	if s.exhausted() {
+		return false
+	}
+	if placed == len(s.history) {
 		return true
 	}
-	for index, operation := range history {
-		if used[index] || !eligible(index, history, used) {
+	for index, operation := range s.history {
+		if s.used[index] || !eligible(index, s.history, s.used) {
 			continue
+		}
+		s.steps++
+		if s.exhausted() {
+			return false
 		}
 		candidate := state.clone()
 		actual := candidate.apply(operation)
 		if !outcomeEqual(actual, operation.Outcome) {
 			continue
 		}
-		used[index] = true
-		if checkOrder(history, used, candidate, placed+1) {
+		s.used[index] = true
+		if s.order(candidate, placed+1) {
 			return true
 		}
-		used[index] = false
+		s.used[index] = false
+		if s.exhausted() {
+			return false
+		}
 	}
 	// A call without a completion is allowed to have no linearization point.
-	for index, operation := range history {
-		if used[index] || !operation.Complete.IsZero() || !eligible(index, history, used) {
+	for index, operation := range s.history {
+		if s.used[index] || !operation.Complete.IsZero() || !eligible(index, s.history, s.used) {
 			continue
 		}
-		used[index] = true
-		if checkOrder(history, used, state, placed+1) {
+		s.steps++
+		if s.exhausted() {
+			return false
+		}
+		s.used[index] = true
+		if s.order(state, placed+1) {
 			return true
 		}
-		used[index] = false
+		s.used[index] = false
 	}
 	return false
 }
