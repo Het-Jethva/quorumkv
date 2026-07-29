@@ -202,6 +202,37 @@ func TestWALCompactionPreservesRecoveryAcrossPartialSegmentDeletion(t *testing.T
 	}
 }
 
+func TestWALRejectsASecondOwnerOfTheDataDirectory(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	owner, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open first WAL: %v", err)
+	}
+
+	second, _, err := Open(directory, identity)
+	if err == nil {
+		second.Close()
+		owner.Close()
+		t.Fatal("Open() accepted a second owner of one data directory")
+	}
+	if !strings.Contains(err.Error(), "lock data directory") {
+		t.Fatalf("Open() error = %v, want a data directory lock failure", err)
+	}
+
+	// Releasing the directory must let a restarted Node take ownership.
+	if err := owner.Close(); err != nil {
+		t.Fatalf("close first WAL: %v", err)
+	}
+	reopened, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen released data directory: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened WAL: %v", err)
+	}
+}
+
 func TestWALRejectsConfiguredIdentityMismatch(t *testing.T) {
 	directory := t.TempDir()
 	wal, _, err := Open(directory, Identity{ClusterID: "cluster-1", NodeID: "node-1"})

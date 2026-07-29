@@ -23,6 +23,7 @@ const (
 	segmentHeaderSize  = int64(len(segmentMagic) + 4)
 	frameHeaderSize    = int64(8)
 	maxRecordSize      = uint32(2 << 20)
+	lockFileName       = "quorumkv.lock"
 )
 
 type recordType byte
@@ -184,6 +185,7 @@ func (w *WAL) SaveCommitIndex(index uint64) error {
 // used after Close.
 type WAL struct {
 	mu            sync.Mutex
+	lock          io.Closer
 	directory     string
 	segmentSize   int64
 	segment       uint64
@@ -214,7 +216,23 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return nil, RecoveredState{}, fmt.Errorf("create WAL directory %q: %w", directory, err)
 	}
+	// Exactly one process may own a data directory. Two Nodes sharing one
+	// directory would interleave frames into the same segment and destroy the
+	// log without any record of the corruption.
+	lock, err := acquireDirectoryLock(filepath.Join(directory, lockFileName))
+	if err != nil {
+		return nil, RecoveredState{}, err
+	}
+	wal, recovered, err := openSegments(directory, identity, segmentSize)
+	if err != nil {
+		_ = lock.Close()
+		return nil, RecoveredState{}, err
+	}
+	wal.lock = lock
+	return wal, recovered, nil
+}
 
+func openSegments(directory string, identity Identity, segmentSize int64) (*WAL, RecoveredState, error) {
 	segments, err := findSegments(directory)
 	if err != nil {
 		return nil, RecoveredState{}, err
@@ -386,19 +404,24 @@ func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex
 	return nil
 }
 
-// Close releases the active segment.
+// Close releases the active segment and the data directory lock.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.file == nil {
-		return nil
+	var first error
+	if w.file != nil {
+		if err := w.file.Close(); err != nil {
+			first = fmt.Errorf("close WAL: %w", err)
+		}
+		w.file = nil
 	}
-	err := w.file.Close()
-	w.file = nil
-	if err != nil {
-		return fmt.Errorf("close WAL: %w", err)
+	if w.lock != nil {
+		if err := w.lock.Close(); err != nil && first == nil {
+			first = fmt.Errorf("release WAL directory lock: %w", err)
+		}
+		w.lock = nil
 	}
-	return nil
+	return first
 }
 
 type segmentFile struct {
