@@ -229,6 +229,156 @@ func TestWALRecoversCommittedPrefixAcrossTruncationAndReplacement(t *testing.T) 
 	}
 }
 
+func TestRetainedLogBytesCountsOnlyNewlyAppliedEntries(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	defer store.Close()
+
+	entries := []LogEntry{
+		{Index: 1, Term: 1, Key: "first", Value: []byte("value-1")},
+		{Index: 2, Term: 1, Key: "second", Value: []byte("value-2")},
+		{Index: 3, Term: 1, Key: "unapplied", Value: []byte("old")},
+	}
+	if err := store.SaveLogEntries(entries); err != nil {
+		t.Fatalf("save log entries: %v", err)
+	}
+
+	firstBytes := logEntryFrameBytes(entries[0])
+	if got := store.RetainedLogBytes(1); got != firstBytes {
+		t.Fatalf("retained bytes through index 1 = %d, want %d", got, firstBytes)
+	}
+	// Changing the source size after the first query proves that a repeated
+	// query returns the cached total instead of recounting the applied prefix.
+	store.entryBytes[1]++
+	if got := store.RetainedLogBytes(1); got != firstBytes {
+		t.Fatalf("repeated retained bytes through index 1 = %d, want cached %d", got, firstBytes)
+	}
+
+	throughTwo := firstBytes + logEntryFrameBytes(entries[1])
+	if got := store.RetainedLogBytes(2); got != throughTwo {
+		t.Fatalf("retained bytes through index 2 = %d, want %d", got, throughTwo)
+	}
+	if got := store.RetainedLogBytes(2); got != throughTwo {
+		t.Fatalf("retained bytes with unapplied entry = %d, want %d", got, throughTwo)
+	}
+	if err := store.TruncateLog(3); err != nil {
+		t.Fatalf("truncate unapplied suffix: %v", err)
+	}
+	if got := store.RetainedLogBytes(2); got != throughTwo {
+		t.Fatalf("retained bytes after unapplied truncation = %d, want %d", got, throughTwo)
+	}
+}
+
+func TestRetainedLogBytesResetsAcrossCompactionAndReopen(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	entries := []LogEntry{
+		{Index: 1, Term: 1, Key: "one"},
+		{Index: 2, Term: 1, Key: "two"},
+		{Index: 3, Term: 2, Key: "three", Value: []byte("value")},
+		{Index: 4, Term: 2, Key: "four", Value: []byte("another value")},
+	}
+	if err := store.SaveLogEntries(entries); err != nil {
+		t.Fatalf("save log entries: %v", err)
+	}
+	if err := store.SaveCommitIndex(4); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if got, want := store.RetainedLogBytes(4), logEntryFrameBytes(entries...); got != want {
+		t.Fatalf("retained bytes before compaction = %d, want %d", got, want)
+	}
+	if err := store.Compact(2, 1); err != nil {
+		t.Fatalf("compact WAL: %v", err)
+	}
+	if got := store.RetainedLogBytes(2); got != 0 {
+		t.Fatalf("retained bytes at compacted Snapshot = %d, want 0", got)
+	}
+	suffixBytes := logEntryFrameBytes(entries[2:]...)
+	if got := store.RetainedLogBytes(4); got != suffixBytes {
+		t.Fatalf("retained bytes after compaction = %d, want suffix %d", got, suffixBytes)
+	}
+	appended := LogEntry{Index: 5, Term: 2, Key: "new", Value: []byte("after compaction")}
+	if err := store.SaveLogEntries([]LogEntry{appended}); err != nil {
+		t.Fatalf("append after compaction: %v", err)
+	}
+	suffixBytes += logEntryFrameBytes(appended)
+	if got := store.RetainedLogBytes(5); got != suffixBytes {
+		t.Fatalf("retained bytes after post-compaction append = %d, want %d", got, suffixBytes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	defer reopened.Close()
+	if got := reopened.RetainedLogBytes(5); got != suffixBytes {
+		t.Fatalf("retained bytes after reopen = %d, want suffix %d", got, suffixBytes)
+	}
+}
+
+func TestRetainedLogBytesResetsAcrossReceivedSnapshotInstall(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	defer store.Close()
+
+	entries := []LogEntry{
+		{Index: 1, Term: 1, Key: "one"},
+		{Index: 2, Term: 2, Key: "two"},
+		{Index: 3, Term: 2, Key: "three"},
+		{Index: 4, Term: 3, Key: "retained", Value: []byte("suffix")},
+	}
+	if err := store.SaveLogEntries(entries); err != nil {
+		t.Fatalf("save log entries: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if got, want := store.RetainedLogBytes(2), logEntryFrameBytes(entries[:2]...); got != want {
+		t.Fatalf("retained bytes before Snapshot install = %d, want %d", got, want)
+	}
+	if err := store.InstallSnapshot(3, 2, true); err != nil {
+		t.Fatalf("install received Snapshot: %v", err)
+	}
+	if got := store.RetainedLogBytes(3); got != 0 {
+		t.Fatalf("retained bytes at installed Snapshot = %d, want 0", got)
+	}
+	suffixBytes := logEntryFrameBytes(entries[3])
+	if got := store.RetainedLogBytes(4); got != suffixBytes {
+		t.Fatalf("retained bytes after Snapshot install = %d, want suffix %d", got, suffixBytes)
+	}
+
+	appended := LogEntry{Index: 5, Term: 3, Key: "new", Value: []byte("after reset")}
+	if err := store.SaveLogEntries([]LogEntry{appended}); err != nil {
+		t.Fatalf("append after received Snapshot: %v", err)
+	}
+	if got, want := store.RetainedLogBytes(5), suffixBytes+logEntryFrameBytes(appended); got != want {
+		t.Fatalf("retained bytes after post-Snapshot append = %d, want %d", got, want)
+	}
+}
+
+func logEntryFrameBytes(entries ...LogEntry) uint64 {
+	var total uint64
+	for _, entry := range entries {
+		total += uint64(frameHeaderSize) + 1 + 49 + uint64(len(entry.Key)+len(entry.Value))
+	}
+	return total
+}
+
 func TestWALCompactionPreservesRecoveryAcrossPartialSegmentDeletion(t *testing.T) {
 	directory := t.TempDir()
 	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}

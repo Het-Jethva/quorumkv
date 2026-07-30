@@ -185,21 +185,23 @@ func (w *WAL) SaveCommitIndex(index uint64) error {
 // WAL is an ordered, synced sequence of consensus records. A WAL must not be
 // used after Close.
 type WAL struct {
-	mu            sync.Mutex
-	lock          io.Closer
-	directory     string
-	segmentSize   int64
-	durability    segmentDurability
-	segment       uint64
-	file          *os.File
-	offset        int64
-	lastLogIndex  uint64
-	commitIndex   uint64
-	hardState     HardState
-	identity      Identity
-	snapshotIndex uint64
-	snapshotTerm  uint64
-	entryBytes    map[uint64]uint64
+	mu                   sync.Mutex
+	lock                 io.Closer
+	directory            string
+	segmentSize          int64
+	durability           segmentDurability
+	segment              uint64
+	file                 *os.File
+	offset               int64
+	lastLogIndex         uint64
+	commitIndex          uint64
+	hardState            HardState
+	identity             Identity
+	snapshotIndex        uint64
+	snapshotTerm         uint64
+	entryBytes           map[uint64]uint64
+	retainedThroughIndex uint64
+	retainedBytes        uint64
 }
 
 // Open creates or recovers the WAL in directory. Existing durable identity
@@ -306,6 +308,7 @@ func openSegments(directory string, identity Identity, segmentSize int64, durabi
 	wal.hardState = recovered.HardState
 	wal.snapshotIndex = recovered.SnapshotIndex
 	wal.snapshotTerm = recovered.SnapshotTerm
+	wal.retainedThroughIndex = recovered.SnapshotIndex
 	for _, entry := range recovered.Log {
 		wal.entryBytes[entry.Index] = uint64(frameHeaderSize) + 1 + 49 + uint64(len(entry.Key)+len(entry.Value))
 	}
@@ -338,13 +341,11 @@ func (w *WAL) SaveHardState(state HardState) error {
 func (w *WAL) RetainedLogBytes(throughIndex uint64) uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var total uint64
-	for index, size := range w.entryBytes {
-		if index > w.snapshotIndex && index <= throughIndex {
-			total += size
-		}
+	for w.retainedThroughIndex < throughIndex {
+		w.retainedThroughIndex++
+		w.retainedBytes += w.entryBytes[w.retainedThroughIndex]
 	}
-	return total
+	return w.retainedBytes
 }
 
 // Compact records a durable recovery checkpoint, then removes complete WAL
@@ -424,6 +425,7 @@ func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex
 		return w.rollbackSnapshotTransaction(startOffset, fmt.Errorf("sync WAL Snapshot transaction: %w", err))
 	}
 	w.snapshotIndex, w.snapshotTerm = snapshotIndex, snapshotTerm
+	w.retainedThroughIndex, w.retainedBytes = snapshotIndex, 0
 	if truncateFrom != 0 {
 		for index := truncateFrom; index <= w.lastLogIndex; index++ {
 			delete(w.entryBytes, index)
