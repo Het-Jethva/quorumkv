@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -51,6 +52,97 @@ func TestWALRecoversLatestHardStateAcrossSegments(t *testing.T) {
 	want := RecoveredState{Identity: identity, HardState: HardState{Term: 3, VotedFor: "node-3"}}
 	if !reflect.DeepEqual(recovered, want) {
 		t.Fatalf("recovered state = %#v, want %#v", recovered, want)
+	}
+}
+
+func TestNewSegmentsSyncHeaderBeforeDirectory(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	var events []string
+	durability := segmentDurability{
+		syncFile: func(file *os.File) error {
+			contents, err := os.ReadFile(file.Name())
+			if err != nil {
+				return fmt.Errorf("inspect segment before sync: %w", err)
+			}
+			if len(contents) != int(segmentHeaderSize) {
+				return fmt.Errorf("segment size at file sync = %d, want complete header size %d", len(contents), segmentHeaderSize)
+			}
+			if string(contents[:len(segmentMagic)]) != segmentMagic {
+				return fmt.Errorf("segment magic at file sync = %q, want %q", contents[:len(segmentMagic)], segmentMagic)
+			}
+			if version := binary.BigEndian.Uint32(contents[len(segmentMagic):]); version != formatVersion {
+				return fmt.Errorf("segment version at file sync = %d, want %d", version, formatVersion)
+			}
+			events = append(events, "file")
+			return file.Sync()
+		},
+		syncDirectory: func(path string) error {
+			events = append(events, "directory")
+			return syncDirectory(path)
+		},
+	}
+
+	store, _, err := openWithDurability(directory, identity, 64, durability)
+	if err != nil {
+		t.Fatalf("open new WAL: %v", err)
+	}
+	defer store.Close()
+	if want := []string{"file", "directory"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("initial segment durability events = %v, want %v", events, want)
+	}
+
+	events = nil
+	if err := store.SaveHardState(HardState{Term: 1, VotedFor: "node-2"}); err != nil {
+		t.Fatalf("save hard state with rollover: %v", err)
+	}
+	if want := []string{"file", "directory"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("rollover segment durability events = %v, want %v", events, want)
+	}
+}
+
+func TestRolloverSyncFailureMakesWALUnusable(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		failFile   bool
+		wantDetail string
+	}{
+		{name: "file", failFile: true, wantDetail: "sync WAL segment header"},
+		{name: "directory", wantDetail: "sync WAL directory after creating segment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+			fail := false
+			durability := segmentDurability{
+				syncFile: func(file *os.File) error {
+					if fail && test.failFile {
+						return errors.New("injected file sync failure")
+					}
+					return file.Sync()
+				},
+				syncDirectory: func(path string) error {
+					if fail && !test.failFile {
+						return errors.New("injected directory sync failure")
+					}
+					return syncDirectory(path)
+				},
+			}
+			store, _, err := openWithDurability(directory, identity, 64, durability)
+			if err != nil {
+				t.Fatalf("open new WAL: %v", err)
+			}
+			defer store.Close()
+
+			fail = true
+			err = store.SaveHardState(HardState{Term: 1, VotedFor: "node-2"})
+			if err == nil || !strings.Contains(err.Error(), test.wantDetail) {
+				t.Fatalf("SaveHardState rollover error = %v, want %q detail", err, test.wantDetail)
+			}
+			if err := store.SaveHardState(HardState{Term: 2}); err == nil || !strings.Contains(err.Error(), "WAL is closed") {
+				t.Fatalf("SaveHardState after failed rollover error = %v, want closed WAL", err)
+			}
+		})
 	}
 }
 

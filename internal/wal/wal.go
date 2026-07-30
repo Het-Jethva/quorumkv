@@ -188,6 +188,7 @@ type WAL struct {
 	lock          io.Closer
 	directory     string
 	segmentSize   int64
+	durability    segmentDurability
 	segment       uint64
 	file          *os.File
 	offset        int64
@@ -207,6 +208,18 @@ func Open(directory string, identity Identity) (*WAL, RecoveredState, error) {
 }
 
 func open(directory string, identity Identity, segmentSize int64) (*WAL, RecoveredState, error) {
+	return openWithDurability(directory, identity, segmentSize, segmentDurability{
+		syncFile:      (*os.File).Sync,
+		syncDirectory: syncDirectory,
+	})
+}
+
+type segmentDurability struct {
+	syncFile      func(*os.File) error
+	syncDirectory func(string) error
+}
+
+func openWithDurability(directory string, identity Identity, segmentSize int64, durability segmentDurability) (*WAL, RecoveredState, error) {
 	if strings.TrimSpace(identity.ClusterID) == "" || strings.TrimSpace(identity.NodeID) == "" {
 		return nil, RecoveredState{}, errors.New("open WAL: Cluster Identity and Node Identity are required")
 	}
@@ -223,7 +236,7 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	if err != nil {
 		return nil, RecoveredState{}, err
 	}
-	wal, recovered, err := openSegments(directory, identity, segmentSize)
+	wal, recovered, err := openSegments(directory, identity, segmentSize, durability)
 	if err != nil {
 		_ = lock.Close()
 		return nil, RecoveredState{}, err
@@ -232,12 +245,18 @@ func open(directory string, identity Identity, segmentSize int64) (*WAL, Recover
 	return wal, recovered, nil
 }
 
-func openSegments(directory string, identity Identity, segmentSize int64) (*WAL, RecoveredState, error) {
+func openSegments(directory string, identity Identity, segmentSize int64, durability segmentDurability) (*WAL, RecoveredState, error) {
 	segments, err := findSegments(directory)
 	if err != nil {
 		return nil, RecoveredState{}, err
 	}
-	wal := &WAL{directory: directory, segmentSize: segmentSize, identity: identity, entryBytes: make(map[uint64]uint64)}
+	wal := &WAL{
+		directory:   directory,
+		segmentSize: segmentSize,
+		durability:  durability,
+		identity:    identity,
+		entryBytes:  make(map[uint64]uint64),
+	}
 	if len(segments) == 0 {
 		if err := wal.createSegment(1); err != nil {
 			return nil, RecoveredState{}, err
@@ -462,13 +481,25 @@ func (w *WAL) createSegment(number uint64) error {
 	copy(header, segmentMagic)
 	binary.BigEndian.PutUint32(header[len(segmentMagic):], formatVersion)
 	if _, err := file.Write(header); err != nil {
-		file.Close()
-		return fmt.Errorf("write WAL segment header %q: %w", path, err)
+		return closeSegmentAfterError(file, fmt.Errorf("write WAL segment header %q: %w", path, err))
+	}
+	if err := w.durability.syncFile(file); err != nil {
+		return closeSegmentAfterError(file, fmt.Errorf("sync WAL segment header %q: %w", path, err))
+	}
+	if err := w.durability.syncDirectory(w.directory); err != nil {
+		return closeSegmentAfterError(file, fmt.Errorf("sync WAL directory after creating segment %q: %w", path, err))
 	}
 	w.segment = number
 	w.file = file
 	w.offset = segmentHeaderSize
 	return nil
+}
+
+func closeSegmentAfterError(file *os.File, cause error) error {
+	if err := file.Close(); err != nil {
+		return errors.Join(cause, fmt.Errorf("close unusable WAL segment %q: %w", file.Name(), err))
+	}
+	return cause
 }
 
 func (w *WAL) appendRecord(kind recordType, payload []byte) error {
