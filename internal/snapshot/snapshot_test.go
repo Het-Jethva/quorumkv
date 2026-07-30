@@ -1,6 +1,8 @@
 package snapshot_test
 
 import (
+	"bytes"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,79 @@ import (
 
 	"github.com/Het-Jethva/quorumkv/internal/snapshot"
 )
+
+func TestOpenStreamsValidatedEncodedSnapshot(t *testing.T) {
+	directory := t.TempDir()
+	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
+	name, err := snapshot.Save(directory, snapshot.State{
+		Identity: identity, IncludedIndex: 7, IncludedTerm: 3,
+		Values: map[string][]byte{"large": bytes.Repeat([]byte("x"), 150<<10)},
+	})
+	if err != nil {
+		t.Fatalf("save Snapshot: %v", err)
+	}
+	want, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read expected encoding: %v", err)
+	}
+
+	handle, err := snapshot.Open(directory, 7, 3)
+	if err != nil {
+		t.Fatalf("open Snapshot: %v", err)
+	}
+	if handle.Length() != uint64(len(want)) || handle.Checksum() != crc32.ChecksumIEEE(want) {
+		t.Fatalf("metadata = %d/%08x, want %d/%08x", handle.Length(), handle.Checksum(), len(want), crc32.ChecksumIEEE(want))
+	}
+	got := make([]byte, len(want))
+	for offset := 0; offset < len(got); offset += 64 << 10 {
+		end := offset + 64<<10
+		if end > len(got) {
+			end = len(got)
+		}
+		if _, err := handle.ReadAt(got[offset:end], int64(offset)); err != nil {
+			t.Fatalf("read chunk at %d: %v", offset, err)
+		}
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("streamed Snapshot differs from stored encoding")
+	}
+	if _, err := handle.ReadAt(make([]byte, 2), int64(len(want)-1)); err == nil {
+		t.Fatal("ReadAt() beyond validated length succeeded")
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("close Snapshot: %v", err)
+	}
+}
+
+func TestOpenRejectsWrongPositionAndCorruption(t *testing.T) {
+	directory := t.TempDir()
+	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
+	name, err := snapshot.Save(directory, snapshot.State{
+		Identity: identity, IncludedIndex: 8, IncludedTerm: 4, Values: map[string][]byte{"key": []byte("value")},
+	})
+	if err != nil {
+		t.Fatalf("save Snapshot: %v", err)
+	}
+	wrongName := filepath.Join(directory, "snapshot-00000000000000000009-00000000000000000004-wrong.qsnap")
+	if err := os.Rename(name, wrongName); err != nil {
+		t.Fatalf("rename Snapshot to wrong position: %v", err)
+	}
+	if _, err := snapshot.Open(directory, 9, 4); err == nil || !strings.Contains(err.Error(), "encoded position 8/4") {
+		t.Fatalf("open wrong-position Snapshot error = %v", err)
+	}
+
+	contents, err := os.ReadFile(wrongName)
+	if err != nil {
+		t.Fatalf("read Snapshot: %v", err)
+	}
+	contents[len(contents)-1] ^= 0xff
+	if err := os.WriteFile(wrongName, contents, 0o600); err != nil {
+		t.Fatalf("corrupt Snapshot: %v", err)
+	}
+	if _, err := snapshot.Open(directory, 9, 4); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("open corrupt Snapshot error = %v", err)
+	}
+}
 
 func TestSaveAndLoadNewestCompatibleSnapshot(t *testing.T) {
 	directory := t.TempDir()

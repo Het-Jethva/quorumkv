@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/crc32"
+	"io"
+	"sync"
 	"time"
 
 	quorumkvv1 "github.com/Het-Jethva/quorumkv/gen/quorumkv/v1"
@@ -94,12 +95,38 @@ func isPeerConfigurationError(err error) bool {
 }
 
 type peerTransport struct {
-	config  config.Config
-	clients map[raft.NodeID]*peerClient
+	config       config.Config
+	clients      map[raft.NodeID]*peerClient
+	openSnapshot func(string, uint64, uint64) (snapshotReader, error)
+
+	snapshotMu     sync.Mutex
+	snapshot       *cachedSnapshot
+	snapshotClosed bool
+}
+
+type snapshotReader interface {
+	Length() uint64
+	Checksum() uint32
+	ReadAt([]byte, int64) (int, error)
+	Close() error
+}
+
+type cachedSnapshot struct {
+	index   uint64
+	term    uint64
+	reader  snapshotReader
+	users   int
+	evicted bool
 }
 
 func newPeerTransport(cfg config.Config) *peerTransport {
-	return &peerTransport{config: cfg, clients: make(map[raft.NodeID]*peerClient)}
+	return &peerTransport{
+		config:  cfg,
+		clients: make(map[raft.NodeID]*peerClient),
+		openSnapshot: func(directory string, index, term uint64) (snapshotReader, error) {
+			return snapshot.Open(directory, index, term)
+		},
+	}
 }
 
 func (t *peerTransport) send(ctx context.Context, action raft.Action) error {
@@ -129,17 +156,23 @@ func (t *peerTransport) send(ctx context.Context, action raft.Action) error {
 }
 
 func (t *peerTransport) sendSnapshot(ctx context.Context, action raft.SendInstallSnapshot) error {
-	contents, err := snapshot.Encoded(t.config.Node.DataDir, action.SnapshotIndex, action.SnapshotTerm)
+	cached, err := t.acquireSnapshot(action.SnapshotIndex, action.SnapshotTerm)
 	if err != nil {
 		return fmt.Errorf("load snapshot for transfer: %w", err)
 	}
-	if action.Offset > uint64(len(contents)) {
-		return fmt.Errorf("snapshot transfer offset %d exceeds length %d", action.Offset, len(contents))
+	defer t.releaseSnapshot(cached)
+	length := cached.reader.Length()
+	if action.Offset > length {
+		return fmt.Errorf("snapshot transfer offset %d exceeds length %d", action.Offset, length)
 	}
 	const chunkSize = 64 << 10
 	end := action.Offset + chunkSize
-	if end > uint64(len(contents)) {
-		end = uint64(len(contents))
+	if end > length {
+		end = length
+	}
+	data := make([]byte, end-action.Offset)
+	if _, err := cached.reader.ReadAt(data, int64(action.Offset)); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read snapshot chunk at offset %d: %w", action.Offset, err)
 	}
 	client, err := t.client(ctx, action.To)
 	if err != nil {
@@ -147,11 +180,45 @@ func (t *peerTransport) sendSnapshot(ctx context.Context, action raft.SendInstal
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, peerRPCTimeout)
 	defer cancel()
-	_, err = client.client.Send(requestCtx, &quorumkvv1.SendRequest{ProtocolVersion: peerProtocolVersion, ClusterId: t.config.ClusterID, FromNodeId: t.config.Node.ID, ToNodeId: string(action.To), Message: &quorumkvv1.SendRequest_InstallSnapshotRequest{InstallSnapshotRequest: &quorumkvv1.InstallSnapshotRequest{Term: action.Term, RequestId: action.RequestID, SnapshotIndex: action.SnapshotIndex, SnapshotTerm: action.SnapshotTerm, SnapshotLength: uint64(len(contents)), SnapshotChecksum: crc32.ChecksumIEEE(contents), Offset: action.Offset, Data: append([]byte(nil), contents[action.Offset:end]...), Done: end == uint64(len(contents))}}})
+	_, err = client.client.Send(requestCtx, &quorumkvv1.SendRequest{ProtocolVersion: peerProtocolVersion, ClusterId: t.config.ClusterID, FromNodeId: t.config.Node.ID, ToNodeId: string(action.To), Message: &quorumkvv1.SendRequest_InstallSnapshotRequest{InstallSnapshotRequest: &quorumkvv1.InstallSnapshotRequest{Term: action.Term, RequestId: action.RequestID, SnapshotIndex: action.SnapshotIndex, SnapshotTerm: action.SnapshotTerm, SnapshotLength: length, SnapshotChecksum: cached.reader.Checksum(), Offset: action.Offset, Data: data, Done: end == length}}})
 	if err != nil {
 		return fmt.Errorf("send snapshot chunk to Node %q: %w", action.To, err)
 	}
 	return nil
+}
+
+func (t *peerTransport) acquireSnapshot(index, term uint64) (*cachedSnapshot, error) {
+	t.snapshotMu.Lock()
+	defer t.snapshotMu.Unlock()
+	if t.snapshotClosed {
+		return nil, errors.New("peer transport is closed")
+	}
+	if t.snapshot != nil && t.snapshot.index == index && t.snapshot.term == term {
+		t.snapshot.users++
+		return t.snapshot, nil
+	}
+	reader, err := t.openSnapshot(t.config.Node.DataDir, index, term)
+	if err != nil {
+		return nil, err
+	}
+	previous := t.snapshot
+	t.snapshot = &cachedSnapshot{index: index, term: term, reader: reader, users: 1}
+	if previous != nil {
+		previous.evicted = true
+		if previous.users == 0 {
+			_ = previous.reader.Close()
+		}
+	}
+	return t.snapshot, nil
+}
+
+func (t *peerTransport) releaseSnapshot(cached *cachedSnapshot) {
+	t.snapshotMu.Lock()
+	defer t.snapshotMu.Unlock()
+	cached.users--
+	if cached.users == 0 && cached.evicted {
+		_ = cached.reader.Close()
+	}
 }
 
 func (t *peerTransport) client(ctx context.Context, id raft.NodeID) (*peerClient, error) {
@@ -195,6 +262,18 @@ func (t *peerTransport) client(ctx context.Context, id raft.NodeID) (*peerClient
 
 func (t *peerTransport) close() error {
 	var first error
+	t.snapshotMu.Lock()
+	t.snapshotClosed = true
+	if t.snapshot != nil {
+		t.snapshot.evicted = true
+		if t.snapshot.users == 0 {
+			if err := t.snapshot.reader.Close(); err != nil {
+				first = fmt.Errorf("close cached Snapshot: %w", err)
+			}
+		}
+		t.snapshot = nil
+	}
+	t.snapshotMu.Unlock()
 	for id, client := range t.clients {
 		if err := client.connection.Close(); err != nil && first == nil {
 			first = fmt.Errorf("close peer connection to Node %q: %w", id, err)

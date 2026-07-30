@@ -58,6 +58,38 @@ type Compatibility struct {
 	SnapshotTerm  uint64
 }
 
+// Handle provides read-only access to one validated immutable Snapshot file.
+// The caller owns the Handle and must close it.
+type Handle struct {
+	file     *os.File
+	length   uint64
+	checksum uint32
+}
+
+// Length returns the complete encoded Snapshot file length.
+func (h *Handle) Length() uint64 {
+	return h.length
+}
+
+// Checksum returns the checksum of the complete encoded Snapshot file.
+func (h *Handle) Checksum() uint32 {
+	return h.checksum
+}
+
+// ReadAt reads an encoded Snapshot range without permitting reads beyond the
+// validated immutable file.
+func (h *Handle) ReadAt(data []byte, offset int64) (int, error) {
+	if offset < 0 || uint64(offset) > h.length || uint64(len(data)) > h.length-uint64(offset) {
+		return 0, fmt.Errorf("read Snapshot range at offset %d with length %d exceeds file length %d", offset, len(data), h.length)
+	}
+	return h.file.ReadAt(data, offset)
+}
+
+// Close releases the open immutable Snapshot file.
+func (h *Handle) Close() error {
+	return h.file.Close()
+}
+
 // Save writes and syncs a temporary file before atomically installing a
 // uniquely named immutable Snapshot.
 func Save(directory string, state State) (string, error) {
@@ -191,9 +223,10 @@ func requireCheckpointSnapshot(directory string, compatibility Compatibility) er
 	return nil
 }
 
-// Encoded returns the newest immutable Snapshot file at the requested
-// position. The returned bytes include the versioned, checksummed file header.
-func Encoded(directory string, includedIndex, includedTerm uint64) ([]byte, error) {
+// Open locates and validates the newest immutable Snapshot file at the
+// requested position. Validation streams through the file and does not retain
+// its complete encoding in memory.
+func Open(directory string, includedIndex, includedTerm uint64) (*Handle, error) {
 	pattern := filepath.Join(directory, fmt.Sprintf("snapshot-%020d-%020d-*.qsnap", includedIndex, includedTerm))
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -204,12 +237,33 @@ func Encoded(directory string, includedIndex, includedTerm uint64) ([]byte, erro
 	}
 	sort.Strings(matches)
 	name := matches[len(matches)-1]
-	contents, err := os.ReadFile(name)
+	file, err := os.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("read snapshot %q: %w", name, err)
+		return nil, fmt.Errorf("open snapshot %q: %w", name, err)
 	}
-	if _, err := decode(name, contents); err != nil {
+	handle, state, err := validateFile(name, file)
+	if err != nil {
+		_ = file.Close()
 		return nil, err
+	}
+	if state.IncludedIndex != includedIndex || state.IncludedTerm != includedTerm {
+		_ = file.Close()
+		return nil, fmt.Errorf("snapshot at %d/%d has encoded position %d/%d", includedIndex, includedTerm, state.IncludedIndex, state.IncludedTerm)
+	}
+	return handle, nil
+}
+
+// Encoded returns a complete validated encoding. Transfer paths should use
+// Open so large Snapshot files are not retained in memory.
+func Encoded(directory string, includedIndex, includedTerm uint64) ([]byte, error) {
+	handle, err := Open(directory, includedIndex, includedTerm)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	contents := make([]byte, handle.Length())
+	if _, err := handle.ReadAt(contents, 0); err != nil {
+		return nil, fmt.Errorf("read encoded Snapshot: %w", err)
 	}
 	return contents, nil
 }
@@ -232,6 +286,68 @@ func read(name string) (*State, error) {
 		return nil, fmt.Errorf("read Snapshot %q: %w", name, err)
 	}
 	return decode(name, contents)
+}
+
+func validateFile(name string, file *os.File) (*Handle, *State, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat Snapshot %q: %w", name, err)
+	}
+	maxSize := int64(maxPayloadSize) + int64(headerSize)
+	if info.Size() > maxSize {
+		return nil, nil, fmt.Errorf("stored Snapshot %q size %d exceeds limit %d", name, info.Size(), maxSize)
+	}
+	if info.Size() < int64(headerSize) {
+		return nil, nil, fmt.Errorf("stored Snapshot %q is shorter than its header", name)
+	}
+
+	header := make([]byte, headerSize)
+	if _, err := file.ReadAt(header, 0); err != nil {
+		return nil, nil, fmt.Errorf("read Snapshot %q header: %w", name, err)
+	}
+	if string(header[:len(magic)]) != magic {
+		return nil, nil, fmt.Errorf("stored Snapshot %q has invalid magic", name)
+	}
+	version := binary.BigEndian.Uint32(header[len(magic):])
+	if version != formatVersion {
+		return nil, nil, fmt.Errorf("stored Snapshot %q has unsupported format version %d", name, version)
+	}
+	payloadLength := binary.BigEndian.Uint64(header[len(magic)+4:])
+	if payloadLength > maxPayloadSize {
+		return nil, nil, fmt.Errorf("stored Snapshot %q payload length %d exceeds limit %d", name, payloadLength, maxPayloadSize)
+	}
+	if payloadLength != uint64(info.Size()-int64(headerSize)) {
+		return nil, nil, fmt.Errorf("stored Snapshot %q length is %d, header records %d", name, info.Size()-int64(headerSize), payloadLength)
+	}
+
+	payloadChecksum := crc32.NewIEEE()
+	fileChecksum := crc32.NewIEEE()
+	_, _ = fileChecksum.Write(header)
+	payload := io.NewSectionReader(file, int64(headerSize), int64(payloadLength))
+	stream := io.TeeReader(payload, io.MultiWriter(payloadChecksum, fileChecksum))
+	decoder := json.NewDecoder(stream)
+	decoder.DisallowUnknownFields()
+	var state State
+	decodeErr := decoder.Decode(&state)
+	if decodeErr == nil {
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			decodeErr = errors.New("trailing payload data")
+		}
+	}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		return nil, nil, fmt.Errorf("read Snapshot %q payload: %w", name, err)
+	}
+	wantChecksum := binary.BigEndian.Uint32(header[len(magic)+12:])
+	if got := payloadChecksum.Sum32(); got != wantChecksum {
+		return nil, nil, fmt.Errorf("stored Snapshot %q checksum mismatch: got %08x, want %08x", name, got, wantChecksum)
+	}
+	if decodeErr != nil {
+		return nil, nil, fmt.Errorf("decode Snapshot %q: %w", name, decodeErr)
+	}
+	if err := validateState(state); err != nil {
+		return nil, nil, fmt.Errorf("validate Snapshot %q: %w", name, err)
+	}
+	return &Handle{file: file, length: uint64(info.Size()), checksum: fileChecksum.Sum32()}, &state, nil
 }
 
 func decode(name string, contents []byte) (*State, error) {
