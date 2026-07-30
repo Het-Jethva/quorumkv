@@ -27,7 +27,8 @@ format and can be reprocessed without rerunning the workload.
 `results/windows-ryzen7-8845hs.json` was produced from this checkout on
 Windows 11 Home Single Language (10.0.26200), AMD Ryzen 7 8845HS, 8 cores / 16
 threads, 15.3 GiB RAM, NVMe SSD, Go 1.26.5, with three local processes,
-1 KiB Values, eight concurrent workers, 500 SETs, and 2,000 GETs:
+1 KiB Values, eight concurrent workers, 500 SET commands, and 2,000 GET
+commands:
 
 | Command | Throughput | p50 | p95 | p99 |
 | --- | ---: | ---: | ---: | ---: |

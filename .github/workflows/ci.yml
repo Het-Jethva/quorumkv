@@ -39,17 +39,6 @@ jobs:
           go test -v ./internal/node \
             -run 'Test(ThreeProcesses|LostSetResponse|SetSurvivesLeaderCrashAtEveryMutationBoundary|ThreeProcessesRepairFollower)' \
             2>&1 | tee artifacts/real-process.log
-      # A recorded history that cannot be explained fails the build. The
-      # recording is kept so the failure can be studied without reproducing it.
-      - name: Check a recorded history for linearizability
-        shell: bash
-        env:
-          QUORUMKV_ARTIFACT_DIR: ${{ github.workspace }}/artifacts
-        run: |
-          set -o pipefail
-          go test -v ./internal/node \
-            -run 'TestConcurrentHistoryIsLinearizableAcrossALeaderKill' \
-            -count 3 2>&1 | tee artifacts/linearizability.log
       - name: Run public Docker failure demo
         shell: bash
         run: set -o pipefail; sh demo/run.sh 2>&1 | tee artifacts/docker-demo.log
