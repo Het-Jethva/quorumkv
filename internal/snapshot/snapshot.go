@@ -132,6 +132,11 @@ func LoadNewest(directory string, compatibility Compatibility) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("find Snapshots: %w", err)
 	}
+	if compatibility.SnapshotIndex > 0 {
+		if err := requireCheckpointSnapshot(directory, compatibility); err != nil {
+			return nil, err
+		}
+	}
 	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 	var newest *State
 	var newestName string
@@ -152,10 +157,38 @@ func LoadNewest(directory string, compatibility Compatibility) (*State, error) {
 			newest, newestName = state, name
 		}
 	}
-	if len(matches) > 0 && newest == nil {
+	if compatibility.SnapshotIndex > 0 && newest == nil {
 		return nil, errors.New("no stored Snapshot is compatible with the durable WAL")
 	}
 	return newest, nil
+}
+
+func requireCheckpointSnapshot(directory string, compatibility Compatibility) error {
+	index, term := compatibility.SnapshotIndex, compatibility.SnapshotTerm
+	pattern := filepath.Join(directory, fmt.Sprintf("snapshot-%020d-%020d-*.qsnap", index, term))
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("find required Snapshot at %d/%d: %w", index, term, err)
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("required Snapshot at %d/%d is not installed", index, term)
+	}
+	for _, name := range matches {
+		state, err := read(name)
+		if err != nil {
+			return fmt.Errorf("required Snapshot at %d/%d is invalid: %w", index, term, err)
+		}
+		if state.IncludedIndex != index || state.IncludedTerm != term {
+			return fmt.Errorf(
+				"required Snapshot at %d/%d has encoded position %d/%d",
+				index, term, state.IncludedIndex, state.IncludedTerm,
+			)
+		}
+		if !equalIdentity(state.Identity, compatibility.Identity) {
+			return fmt.Errorf("required Snapshot at %d/%d identity does not match configured Cluster membership", index, term)
+		}
+	}
+	return nil
 }
 
 // Encoded returns the newest immutable Snapshot file at the requested

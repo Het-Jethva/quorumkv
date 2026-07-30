@@ -57,7 +57,7 @@ func TestSaveAndLoadNewestCompatibleSnapshot(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsSnapshotsWithoutCompatibleWALHistory(t *testing.T) {
+func TestLoadIgnoresSnapshotAheadOfWALWithoutCheckpoint(t *testing.T) {
 	directory := t.TempDir()
 	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
 	if _, err := snapshot.Save(directory, snapshot.State{
@@ -65,9 +65,106 @@ func TestLoadRejectsSnapshotsWithoutCompatibleWALHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save Snapshot: %v", err)
 	}
-	_, err := snapshot.LoadNewest(directory, snapshot.Compatibility{Identity: identity, CommitIndex: 1, LogTerms: []uint64{1}})
-	if err == nil || !strings.Contains(err.Error(), "compatible with the durable WAL") {
-		t.Fatalf("load incompatible Snapshot error = %v, want WAL compatibility diagnostic", err)
+
+	loaded, err := snapshot.LoadNewest(directory, snapshot.Compatibility{Identity: identity, CommitIndex: 1, LogTerms: []uint64{1}})
+	if err != nil {
+		t.Fatalf("load with uncommitted orphan Snapshot: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("loaded Snapshot = %#v, want no Snapshot", loaded)
+	}
+}
+
+func TestLoadIgnoresSeveralUnmatchedSnapshotsWithoutCheckpoint(t *testing.T) {
+	directory := t.TempDir()
+	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
+	for _, state := range []snapshot.State{
+		{Identity: identity, IncludedIndex: 2, IncludedTerm: 1, Values: map[string][]byte{}},
+		{Identity: identity, IncludedIndex: 4, IncludedTerm: 2, Values: map[string][]byte{}},
+	} {
+		if _, err := snapshot.Save(directory, state); err != nil {
+			t.Fatalf("save Snapshot at %d/%d: %v", state.IncludedIndex, state.IncludedTerm, err)
+		}
+	}
+
+	loaded, err := snapshot.LoadNewest(directory, snapshot.Compatibility{
+		Identity: identity, CommitIndex: 1, LogTerms: []uint64{1},
+	})
+	if err != nil {
+		t.Fatalf("load with uncommitted orphan Snapshots: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("loaded Snapshot = %#v, want no Snapshot", loaded)
+	}
+}
+
+func TestLoadRequiresCheckpointSnapshot(t *testing.T) {
+	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
+	tests := []struct {
+		name      string
+		snapshots []snapshot.State
+	}{
+		{name: "no Snapshot files"},
+		{
+			name: "wrong index",
+			snapshots: []snapshot.State{
+				{Identity: identity, IncludedIndex: 4, IncludedTerm: 3, Values: map[string][]byte{}},
+			},
+		},
+		{
+			name: "wrong Term",
+			snapshots: []snapshot.State{
+				{Identity: identity, IncludedIndex: 5, IncludedTerm: 2, Values: map[string][]byte{}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			for _, state := range tt.snapshots {
+				if _, err := snapshot.Save(directory, state); err != nil {
+					t.Fatalf("save Snapshot at %d/%d: %v", state.IncludedIndex, state.IncludedTerm, err)
+				}
+			}
+
+			_, err := snapshot.LoadNewest(directory, snapshot.Compatibility{
+				Identity: identity, CommitIndex: 5, SnapshotIndex: 5, SnapshotTerm: 3,
+			})
+			if err == nil || !strings.Contains(err.Error(), "required Snapshot at 5/3") {
+				t.Fatalf("load without required Snapshot error = %v, want required position diagnostic", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsCorruptRequiredSnapshotWithoutFallback(t *testing.T) {
+	directory := t.TempDir()
+	identity := snapshot.Identity{ClusterID: "cluster-1", NodeID: "node-1", MemberIDs: []string{"node-1", "node-2", "node-3"}}
+	if _, err := snapshot.Save(directory, snapshot.State{
+		Identity: identity, IncludedIndex: 4, IncludedTerm: 2, Values: map[string][]byte{},
+	}); err != nil {
+		t.Fatalf("save older Snapshot: %v", err)
+	}
+	requiredName, err := snapshot.Save(directory, snapshot.State{
+		Identity: identity, IncludedIndex: 5, IncludedTerm: 3, Values: map[string][]byte{},
+	})
+	if err != nil {
+		t.Fatalf("save required Snapshot: %v", err)
+	}
+	contents, err := os.ReadFile(requiredName)
+	if err != nil {
+		t.Fatalf("read required Snapshot: %v", err)
+	}
+	contents[len(contents)-1] ^= 0xff
+	if err := os.WriteFile(requiredName, contents, 0o600); err != nil {
+		t.Fatalf("corrupt required Snapshot: %v", err)
+	}
+
+	_, err = snapshot.LoadNewest(directory, snapshot.Compatibility{
+		Identity: identity, CommitIndex: 5, SnapshotIndex: 5, SnapshotTerm: 3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "required Snapshot at 5/3") || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("load corrupt required Snapshot error = %v, want required position and corruption diagnostics", err)
 	}
 }
 
