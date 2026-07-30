@@ -223,6 +223,80 @@ func TestRaftRuntimePersistsConflictingSuffixReplacement(t *testing.T) {
 	}
 }
 
+func TestRaftRuntimeDurablyDiscardsSnapshotIncompatibleSuffix(t *testing.T) {
+	directory := t.TempDir()
+	cfg := config.Config{
+		ClusterID: "cluster-1",
+		Node:      config.Node{ID: "node-2", DataDir: directory},
+		Members: map[string]config.Member{
+			"node-1": {}, "node-2": {}, "node-3": {},
+		},
+	}
+	store, _, err := wal.Open(directory, wal.Identity{ClusterID: cfg.ClusterID, NodeID: cfg.Node.ID})
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]wal.LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4},
+	}); err != nil {
+		t.Fatalf("save divergent log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seeded WAL: %v", err)
+	}
+	if _, err := snapshot.Save(directory, snapshot.State{
+		Identity: snapshotIdentity(cfg), IncludedIndex: 3, IncludedTerm: 2, Values: map[string][]byte{},
+	}); err != nil {
+		t.Fatalf("save received Snapshot: %v", err)
+	}
+
+	runtime, err := openRaftRuntime(cfg, []raft.NodeID{"node-1", "node-3"})
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer func() {
+		if runtime != nil {
+			_ = runtime.close()
+		}
+	}()
+	actions, err := runtime.step(raft.InstallSnapshot{
+		From: "node-1", Term: 4, RequestID: 9, SnapshotIndex: 3, SnapshotTerm: 2,
+		Done: true, Success: true, NextOffset: 100,
+	})
+	if err != nil {
+		t.Fatalf("install divergent Snapshot: %v", err)
+	}
+	if len(actions) != 3 {
+		t.Fatalf("Snapshot completion actions = %#v, want timer reset, restore, and response", actions)
+	}
+	if restore, ok := actions[1].(raft.RestoreSnapshot); !ok || restore.SnapshotIndex != 3 || restore.SnapshotTerm != 2 {
+		t.Fatalf("Snapshot restore action = %#v, want restore at 3/2", actions[1])
+	}
+	if _, err := runtime.step(raft.AppendEntries{
+		From: "node-1", Term: 5, RequestID: 10, PrevLogIndex: 3, PrevLogTerm: 2,
+		Entries: []raft.LogEntry{{Index: 4, Term: 5}},
+	}); err != nil {
+		t.Fatalf("append immediately after Snapshot install: %v", err)
+	}
+	if err := runtime.close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	runtime = nil
+
+	reopened, err := openRaftRuntime(cfg, []raft.NodeID{"node-1", "node-3"})
+	if err != nil {
+		t.Fatalf("reopen runtime: %v", err)
+	}
+	defer reopened.close()
+	state := reopened.core.State()
+	if state.SnapshotIndex != 3 || state.CommitIndex != 3 || state.LastLogIndex != 4 || state.LastLogTerm != 5 {
+		t.Fatalf("recovered state = %#v, want Snapshot 3/2 plus replacement at 4/5", state)
+	}
+}
+
 func runVoteProcess(t *testing.T, directory, candidate string) string {
 	t.Helper()
 	executable, err := os.Executable()

@@ -151,6 +151,16 @@ func (r *raftRuntime) step(event raft.Event) ([]raft.Action, error) {
 			pending = append(pending, r.core.Step(raft.CommitIndexPersisted{
 				PersistenceID: persist.PersistenceID,
 			})...)
+		case raft.PersistSnapshot:
+			if err := r.wal.InstallSnapshot(persist.SnapshotIndex, persist.SnapshotTerm, persist.RetainSuffix); err != nil {
+				return nil, fmt.Errorf("persist received Snapshot: %w", err)
+			}
+			if r.metrics != nil {
+				r.metrics.walSyncs.Add(1)
+			}
+			pending = append(pending, r.core.Step(raft.SnapshotPersisted{
+				PersistenceID: persist.PersistenceID,
+			})...)
 		default:
 			emitted = append(emitted, action)
 		}

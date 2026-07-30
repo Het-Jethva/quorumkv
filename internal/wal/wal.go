@@ -82,6 +82,7 @@ type compactionCheckpoint struct {
 	CommitIndex   uint64    `json:"commit_index"`
 	SnapshotIndex uint64    `json:"snapshot_index"`
 	SnapshotTerm  uint64    `json:"snapshot_term"`
+	TruncateFrom  uint64    `json:"truncate_from,omitempty"`
 }
 
 // SaveLogEntries appends ordered entries and returns only after they are synced.
@@ -358,13 +359,13 @@ func (w *WAL) Compact(snapshotIndex, snapshotTerm uint64) error {
 	if snapshotIndex == 0 || snapshotIndex > w.commitIndex {
 		return fmt.Errorf("compact WAL: Snapshot index %d is outside committed prefix ending at %d", snapshotIndex, w.commitIndex)
 	}
-	return w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, w.commitIndex)
+	return w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, w.commitIndex, 0)
 }
 
 // InstallSnapshot advances durable recovery state to a Snapshot received from
-// the Leader. Unlike local compaction, the included index may be newer than
-// this Follower's retained log and commit index.
-func (w *WAL) InstallSnapshot(snapshotIndex, snapshotTerm uint64) error {
+// the Leader. retainSuffix is Raft's decision about whether entries after the
+// Snapshot remain compatible with the installed state.
+func (w *WAL) InstallSnapshot(snapshotIndex, snapshotTerm uint64, retainSuffix bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
@@ -373,27 +374,61 @@ func (w *WAL) InstallSnapshot(snapshotIndex, snapshotTerm uint64) error {
 	if snapshotIndex == 0 || snapshotTerm == 0 || snapshotIndex < w.snapshotIndex {
 		return fmt.Errorf("install Snapshot in WAL: invalid position %d/%d after %d/%d", snapshotIndex, snapshotTerm, w.snapshotIndex, w.snapshotTerm)
 	}
-	if err := w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, max(w.commitIndex, snapshotIndex)); err != nil {
+	if !retainSuffix && snapshotIndex < w.commitIndex {
+		return fmt.Errorf("install Snapshot in WAL: discarding suffix after index %d would remove committed index %d", snapshotIndex, w.commitIndex)
+	}
+	truncateFrom := uint64(0)
+	if !retainSuffix && snapshotIndex < w.lastLogIndex {
+		truncateFrom = snapshotIndex + 1
+	}
+	if err := w.installSnapshotCheckpoint(snapshotIndex, snapshotTerm, max(w.commitIndex, snapshotIndex), truncateFrom); err != nil {
 		return err
 	}
 	w.commitIndex = max(w.commitIndex, snapshotIndex)
-	w.lastLogIndex = max(w.lastLogIndex, snapshotIndex)
+	if retainSuffix {
+		w.lastLogIndex = max(w.lastLogIndex, snapshotIndex)
+	} else {
+		w.lastLogIndex = snapshotIndex
+	}
 	return nil
 }
 
-func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex uint64) error {
-	checkpoint := compactionCheckpoint{Identity: w.identity, HardState: w.hardState, CommitIndex: commitIndex, SnapshotIndex: snapshotIndex, SnapshotTerm: snapshotTerm}
+func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex uint64, truncateFrom uint64) error {
+	checkpoint := compactionCheckpoint{
+		Identity: w.identity, HardState: w.hardState, CommitIndex: commitIndex,
+		SnapshotIndex: snapshotIndex, SnapshotTerm: snapshotTerm, TruncateFrom: truncateFrom,
+	}
 	payload, err := json.Marshal(checkpoint)
 	if err != nil {
 		return fmt.Errorf("encode WAL compaction checkpoint: %w", err)
 	}
-	if err := w.appendRecord(recordCompactionCheckpoint, payload); err != nil {
-		return fmt.Errorf("append WAL compaction checkpoint: %w", err)
+	batchSize := recordFrameSize(payload)
+	if truncateFrom != 0 {
+		batchSize += recordFrameSize(make([]byte, 8))
 	}
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("sync WAL compaction checkpoint: %w", err)
+	if err := w.prepareRecordBatch(batchSize); err != nil {
+		return fmt.Errorf("prepare WAL Snapshot transaction: %w", err)
+	}
+	startOffset := w.offset
+	if err := w.appendRecordInSegment(recordCompactionCheckpoint, payload); err != nil {
+		return w.rollbackSnapshotTransaction(startOffset, fmt.Errorf("append WAL compaction checkpoint: %w", err))
+	}
+	if truncateFrom != 0 {
+		truncation := make([]byte, 8)
+		binary.BigEndian.PutUint64(truncation, truncateFrom)
+		if err := w.appendRecordInSegment(recordLogTruncation, truncation); err != nil {
+			return w.rollbackSnapshotTransaction(startOffset, fmt.Errorf("append Snapshot log truncation from index %d: %w", truncateFrom, err))
+		}
+	}
+	if err := w.durability.syncFile(w.file); err != nil {
+		return w.rollbackSnapshotTransaction(startOffset, fmt.Errorf("sync WAL Snapshot transaction: %w", err))
 	}
 	w.snapshotIndex, w.snapshotTerm = snapshotIndex, snapshotTerm
+	if truncateFrom != 0 {
+		for index := truncateFrom; index <= w.lastLogIndex; index++ {
+			delete(w.entryBytes, index)
+		}
+	}
 	segments, err := findSegments(w.directory)
 	if err != nil {
 		return err
@@ -419,6 +454,29 @@ func (w *WAL) installSnapshotCheckpoint(snapshotIndex, snapshotTerm, commitIndex
 		if index <= snapshotIndex {
 			delete(w.entryBytes, index)
 		}
+	}
+	return nil
+}
+
+func (w *WAL) rollbackSnapshotTransaction(offset int64, cause error) error {
+	if rollbackErr := w.rollbackUnsyncedRecords(offset); rollbackErr != nil {
+		_ = w.file.Close()
+		w.file = nil
+		return errors.Join(cause, rollbackErr)
+	}
+	return cause
+}
+
+func (w *WAL) rollbackUnsyncedRecords(offset int64) error {
+	if err := w.file.Truncate(offset); err != nil {
+		return fmt.Errorf("rollback unsynced WAL Snapshot transaction at byte offset %d: %w", offset, err)
+	}
+	if _, err := w.file.Seek(offset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek after rolling back WAL Snapshot transaction at byte offset %d: %w", offset, err)
+	}
+	w.offset = offset
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync rollback of WAL Snapshot transaction at byte offset %d: %w", offset, err)
 	}
 	return nil
 }
@@ -508,7 +566,18 @@ func (w *WAL) appendRecord(kind recordType, payload []byte) error {
 		return fmt.Errorf("record size %d exceeds limit %d", len(body), maxRecordSize)
 	}
 	frameSize := frameHeaderSize + int64(len(body))
-	if w.offset > segmentHeaderSize && w.offset+frameSize > w.segmentSize {
+	if err := w.prepareRecordBatch(frameSize); err != nil {
+		return err
+	}
+	return w.appendRecordInSegment(kind, payload)
+}
+
+func recordFrameSize(payload []byte) int64 {
+	return frameHeaderSize + 1 + int64(len(payload))
+}
+
+func (w *WAL) prepareRecordBatch(size int64) error {
+	if w.offset > segmentHeaderSize && w.offset+size > w.segmentSize {
 		if err := w.file.Sync(); err != nil {
 			return fmt.Errorf("sync full WAL segment: %w", err)
 		}
@@ -520,6 +589,15 @@ func (w *WAL) appendRecord(kind recordType, payload []byte) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (w *WAL) appendRecordInSegment(kind recordType, payload []byte) error {
+	body := append([]byte{byte(kind)}, payload...)
+	if uint64(len(body)) > uint64(maxRecordSize) {
+		return fmt.Errorf("record size %d exceeds limit %d", len(body), maxRecordSize)
+	}
+	frameSize := frameHeaderSize + int64(len(body))
 	header := make([]byte, frameHeaderSize)
 	binary.BigEndian.PutUint32(header[0:4], uint32(len(body)))
 	binary.BigEndian.PutUint32(header[4:8], crc32.ChecksumIEEE(body))
@@ -749,8 +827,14 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 			return fmt.Errorf("log-truncation record length %d, want 8", len(payload))
 		}
 		firstIndex := binary.BigEndian.Uint64(payload)
+		if firstIndex == 0 {
+			return errors.New("log truncation from index 0 is invalid")
+		}
+		if firstIndex <= state.SnapshotIndex {
+			return nil
+		}
 		lastIndex := state.SnapshotIndex + uint64(len(state.Log))
-		if firstIndex <= state.SnapshotIndex || firstIndex > lastIndex+1 {
+		if firstIndex > lastIndex+1 {
 			return fmt.Errorf("log truncation from index %d is outside retained log ending at %d", firstIndex, lastIndex)
 		}
 		if firstIndex <= state.CommitIndex {
@@ -781,6 +865,17 @@ func applyRecord(kind recordType, payload []byte, state *RecoveredState) error {
 		if checkpoint.SnapshotIndex > state.SnapshotIndex {
 			return errors.New("compaction checkpoint is newer than recovery metadata")
 		}
+		if checkpoint.TruncateFrom != 0 {
+			if checkpoint.TruncateFrom != checkpoint.SnapshotIndex+1 {
+				return fmt.Errorf("compaction checkpoint has invalid log truncation from index %d after Snapshot index %d", checkpoint.TruncateFrom, checkpoint.SnapshotIndex)
+			}
+			if checkpoint.SnapshotIndex == state.SnapshotIndex {
+				first := sort.Search(len(state.Log), func(index int) bool {
+					return state.Log[index].Index >= checkpoint.TruncateFrom
+				})
+				state.Log = state.Log[:first]
+			}
+		}
 	default:
 		return fmt.Errorf("unknown record type %d", kind)
 	}
@@ -803,6 +898,9 @@ func newestCompactionCheckpoint(segments []segmentFile) (compactionCheckpoint, e
 			}
 			if checkpoint.SnapshotIndex == 0 || checkpoint.SnapshotTerm == 0 || checkpoint.SnapshotIndex > checkpoint.CommitIndex {
 				return fmt.Errorf("WAL compaction checkpoint in %q has invalid Snapshot position %d/%d at commit %d", segment.path, checkpoint.SnapshotIndex, checkpoint.SnapshotTerm, checkpoint.CommitIndex)
+			}
+			if checkpoint.TruncateFrom != 0 && checkpoint.TruncateFrom != checkpoint.SnapshotIndex+1 {
+				return fmt.Errorf("WAL compaction checkpoint in %q has invalid log truncation from index %d after Snapshot index %d", segment.path, checkpoint.TruncateFrom, checkpoint.SnapshotIndex)
 			}
 			newest = checkpoint
 			return nil

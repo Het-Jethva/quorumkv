@@ -294,6 +294,259 @@ func TestWALCompactionPreservesRecoveryAcrossPartialSegmentDeletion(t *testing.T
 	}
 }
 
+func TestInstallSnapshotRetainsCompatibleSuffixAcrossReopen(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 2}, {Index: 4, Term: 4},
+	}); err != nil {
+		t.Fatalf("save log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.InstallSnapshot(3, 2, true); err != nil {
+		t.Fatalf("install compatible Snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 3 || recovered.SnapshotTerm != 2 || recovered.CommitIndex != 3 {
+		t.Fatalf("recovered Snapshot metadata = %#v, want position 3/2 and commit 3", recovered)
+	}
+	want := []LogEntry{{Index: 4, Term: 4}}
+	if !reflect.DeepEqual(recovered.Log, want) {
+		t.Fatalf("recovered compatible suffix = %#v, want %#v", recovered.Log, want)
+	}
+}
+
+func TestInstallSnapshotDiscardsDivergentSuffixAndAcceptsImmediateAppend(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4},
+	}); err != nil {
+		t.Fatalf("save divergent log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.InstallSnapshot(3, 2, false); err != nil {
+		t.Fatalf("install divergent Snapshot: %v", err)
+	}
+	replacement := LogEntry{Index: 4, Term: 5, Key: "replacement", Value: []byte("kept")}
+	if err := store.SaveLogEntries([]LogEntry{replacement}); err != nil {
+		t.Fatalf("append immediately after divergent Snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 3 || recovered.SnapshotTerm != 2 || recovered.CommitIndex != 3 {
+		t.Fatalf("recovered Snapshot metadata = %#v, want position 3/2 and commit 3", recovered)
+	}
+	if !reflect.DeepEqual(recovered.Log, []LogEntry{replacement}) {
+		t.Fatalf("recovered log = %#v, want only replacement %#v", recovered.Log, replacement)
+	}
+}
+
+func TestInstallSnapshotSyncBoundaryIsAtomic(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	failInstallSync := false
+	trackInstallSync := false
+	installSyncCalls := 0
+	durability := segmentDurability{
+		syncFile: func(file *os.File) error {
+			if trackInstallSync {
+				installSyncCalls++
+			}
+			if failInstallSync {
+				failInstallSync = false
+				return errors.New("injected Snapshot sync failure")
+			}
+			return file.Sync()
+		},
+		syncDirectory: syncDirectory,
+	}
+	store, _, err := openWithDurability(directory, identity, defaultSegmentSize, durability)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	original := []LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4},
+	}
+	if err := store.SaveLogEntries(original); err != nil {
+		t.Fatalf("save divergent log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+
+	trackInstallSync = true
+	failInstallSync = true
+	err = store.InstallSnapshot(3, 2, false)
+	trackInstallSync = false
+	if err == nil || !strings.Contains(err.Error(), "injected Snapshot sync failure") {
+		t.Fatalf("install with failed sync error = %v, want injected failure", err)
+	}
+	if installSyncCalls != 1 {
+		t.Fatalf("failed Snapshot install sync calls = %d, want one combined sync", installSyncCalls)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL after failed install: %v", err)
+	}
+	store, recovered, err := openWithDurability(directory, identity, defaultSegmentSize, durability)
+	if err != nil {
+		t.Fatalf("reopen WAL after failed install: %v", err)
+	}
+	if recovered.SnapshotIndex != 0 || recovered.CommitIndex != 2 || !reflect.DeepEqual(recovered.Log, original) {
+		t.Fatalf("state after failed install = %#v, want complete pre-install state", recovered)
+	}
+
+	installSyncCalls = 0
+	trackInstallSync = true
+	err = store.InstallSnapshot(3, 2, false)
+	trackInstallSync = false
+	if err != nil {
+		t.Fatalf("install Snapshot after sync recovers: %v", err)
+	}
+	if installSyncCalls != 1 {
+		t.Fatalf("successful Snapshot install sync calls = %d, want one combined sync", installSyncCalls)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL after successful install: %v", err)
+	}
+	reopened, recovered, err := openWithDurability(directory, identity, defaultSegmentSize, durability)
+	if err != nil {
+		t.Fatalf("reopen WAL after successful install: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 3 || recovered.SnapshotTerm != 2 || recovered.CommitIndex != 3 || len(recovered.Log) != 0 {
+		t.Fatalf("state after successful install = %#v, want complete truncation and checkpoint", recovered)
+	}
+}
+
+func TestInstallSnapshotCheckpointSurvivesCrashBeforeTruncationFrame(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4},
+	}); err != nil {
+		t.Fatalf("save divergent log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	if err := store.InstallSnapshot(3, 2, false); err != nil {
+		t.Fatalf("install divergent Snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	segments, err := findSegments(directory)
+	if err != nil {
+		t.Fatalf("find WAL segments: %v", err)
+	}
+	active := segments[len(segments)-1].path
+	contents := readFile(t, active)
+	if err := os.Truncate(active, lastFrameOffset(t, contents)); err != nil {
+		t.Fatalf("model crash before truncation frame: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("recover checkpoint without following truncation frame: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 3 || recovered.SnapshotTerm != 2 || recovered.CommitIndex != 3 || len(recovered.Log) != 0 {
+		t.Fatalf("recovered state = %#v, want checkpoint's complete discard decision", recovered)
+	}
+}
+
+func TestInstallSnapshotRecoveryIgnoresTruncationsCoveredByNewerSnapshot(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{
+		{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4},
+	}); err != nil {
+		t.Fatalf("save initial divergent log: %v", err)
+	}
+	if err := store.SaveCommitIndex(2); err != nil {
+		t.Fatalf("save initial commit index: %v", err)
+	}
+	if err := store.InstallSnapshot(3, 2, false); err != nil {
+		t.Fatalf("install first Snapshot: %v", err)
+	}
+	if err := store.SaveLogEntries([]LogEntry{{Index: 4, Term: 5}, {Index: 5, Term: 5}}); err != nil {
+		t.Fatalf("save suffix after first Snapshot: %v", err)
+	}
+	if err := store.InstallSnapshot(4, 3, false); err != nil {
+		t.Fatalf("install newer divergent Snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, recovered, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("reopen WAL after sequential Snapshot installs: %v", err)
+	}
+	defer reopened.Close()
+	if recovered.SnapshotIndex != 4 || recovered.SnapshotTerm != 3 || recovered.CommitIndex != 4 || len(recovered.Log) != 0 {
+		t.Fatalf("recovered state = %#v, want only newer Snapshot at 4/3", recovered)
+	}
+}
+
+func TestInstallSnapshotRefusesToDiscardCommittedSuffix(t *testing.T) {
+	directory := t.TempDir()
+	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}
+	store, _, err := Open(directory, identity)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	defer store.Close()
+	entries := []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}, {Index: 4, Term: 4}}
+	if err := store.SaveLogEntries(entries); err != nil {
+		t.Fatalf("save log: %v", err)
+	}
+	if err := store.SaveCommitIndex(4); err != nil {
+		t.Fatalf("save commit index: %v", err)
+	}
+	err = store.InstallSnapshot(3, 2, false)
+	if err == nil || !strings.Contains(err.Error(), "would remove committed index 4") {
+		t.Fatalf("discard committed suffix error = %v, want committed-history diagnostic", err)
+	}
+}
+
 func TestWALRejectsASecondOwnerOfTheDataDirectory(t *testing.T) {
 	directory := t.TempDir()
 	identity := Identity{ClusterID: "cluster-1", NodeID: "node-1"}

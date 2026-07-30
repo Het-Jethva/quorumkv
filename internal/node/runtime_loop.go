@@ -117,6 +117,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 		data                []byte
 	}
 	var incoming *incomingSnapshot
+	var readySnapshot *snapshot.State
 	pending := make(map[uint64][]pendingProposal)
 	inFlightMutations := make(map[raft.SessionID]inFlightMutation)
 	pendingReads := make(map[raft.ReadID]pendingRead)
@@ -201,14 +202,7 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 						if _, err := snapshot.Save(n.config.Node.DataDir, *state); err != nil {
 							return fmt.Errorf("install received Snapshot file: %w", err)
 						}
-						if err := runtime.wal.InstallSnapshot(state.IncludedIndex, state.IncludedTerm); err != nil {
-							return fmt.Errorf("persist received Snapshot: %w", err)
-						}
-						if err := sessions.restore(state); err != nil {
-							return fmt.Errorf("restore received Snapshot: %w", err)
-						}
-						n.metrics.snapshotInstalls.Add(1)
-						request.Installed = true
+						readySnapshot = state
 					} else {
 						request.Success = false
 						request.NextOffset = 0
@@ -279,6 +273,15 @@ func (n *Node) runRaft(ctx context.Context, runtime *raftRuntime, transport *pee
 				heartbeatTimer, heartbeatC = resetOptionalTimer(heartbeatTimer, heartbeatInterval)
 			case raft.ResetCheckQuorumTimer:
 				quorumTimer, quorumC = resetOptionalTimer(quorumTimer, checkQuorumWindow)
+			case raft.RestoreSnapshot:
+				if readySnapshot == nil || readySnapshot.IncludedIndex != action.SnapshotIndex || readySnapshot.IncludedTerm != action.SnapshotTerm {
+					return fmt.Errorf("restore received Snapshot at %d/%d without matching staged state", action.SnapshotIndex, action.SnapshotTerm)
+				}
+				if err := sessions.restore(readySnapshot); err != nil {
+					return fmt.Errorf("restore received Snapshot: %w", err)
+				}
+				readySnapshot = nil
+				n.metrics.snapshotInstalls.Add(1)
 			case raft.ProposalAccepted:
 				n.metrics.proposals.Add(1)
 				if proposalResults != nil && proposalContext != nil {

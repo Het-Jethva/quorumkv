@@ -87,6 +87,12 @@ type CommitIndexPersisted struct{ PersistenceID uint64 }
 
 func (CommitIndexPersisted) isEvent() {}
 
+// SnapshotPersisted reports that a received Snapshot and Raft's suffix
+// retention decision are durable.
+type SnapshotPersisted struct{ PersistenceID uint64 }
+
+func (SnapshotPersisted) isEvent() {}
+
 // RecoverCommitted asks the core to reconstruct lastApplied by emitting the
 // durable committed prefix once during startup.
 type RecoverCommitted struct{}
@@ -214,7 +220,7 @@ type AppendEntriesFailed struct {
 func (AppendEntriesFailed) isEvent() {}
 
 // InstallSnapshot carries one bounded chunk. The runtime validates and stages
-// Data, then sets Success and Installed before delivering the event to Step.
+// Data, then sets Success before delivering the event to Step.
 type InstallSnapshot struct {
 	From          NodeID
 	Term          uint64
@@ -228,7 +234,6 @@ type InstallSnapshot struct {
 	Done          bool
 	Success       bool
 	NextOffset    uint64
-	Installed     bool
 }
 
 func (InstallSnapshot) isEvent() {}
@@ -273,6 +278,17 @@ type PersistCommitIndex struct {
 }
 
 func (PersistCommitIndex) isAction() {}
+
+// PersistSnapshot asks the runtime to install a received Snapshot while
+// preserving or discarding the local suffix exactly as Raft decided.
+type PersistSnapshot struct {
+	PersistenceID uint64
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
+	RetainSuffix  bool
+}
+
+func (PersistSnapshot) isAction() {}
 
 // SendPreVoteRequest sends a pre-vote request to one peer.
 type SendPreVoteRequest struct {
@@ -342,6 +358,15 @@ type SendInstallSnapshotResponse struct {
 }
 
 func (SendInstallSnapshotResponse) isAction() {}
+
+// RestoreSnapshot asks the runtime to replace the live state machine with the
+// received Snapshot after its WAL checkpoint is durable.
+type RestoreSnapshot struct {
+	SnapshotIndex uint64
+	SnapshotTerm  uint64
+}
+
+func (RestoreSnapshot) isAction() {}
 
 // ResetElectionTimer asks the runtime to choose and schedule a new randomized
 // election timeout.
@@ -474,6 +499,11 @@ type pendingCommitPersistence struct {
 	after       []Action
 }
 
+type pendingSnapshotPersistence struct {
+	request      InstallSnapshot
+	retainSuffix bool
+}
+
 type pendingRead struct {
 	acknowledgements map[NodeID]struct{}
 	commitIndex      uint64
@@ -525,6 +555,8 @@ type Node struct {
 	durableCommitIndex       uint64
 	nextCommitPersistence    uint64
 	pendingCommit            map[uint64]pendingCommitPersistence
+	nextSnapshotPersistence  uint64
+	pendingSnapshot          map[uint64]pendingSnapshotPersistence
 }
 
 // NewNode creates a Follower with an empty log and no durable election state.
@@ -585,6 +617,7 @@ func NewNodeFromRecoveredState(id NodeID, peers []NodeID, recovered RecoveredSta
 		pendingHardState:   make(map[uint64]pendingHardStatePersistence),
 		pendingLog:         make(map[uint64]pendingLogPersistence),
 		pendingCommit:      make(map[uint64]pendingCommitPersistence),
+		pendingSnapshot:    make(map[uint64]pendingSnapshotPersistence),
 		pendingReads:       make(map[ReadID]*pendingRead),
 	}
 	if len(recovered.Log) > 0 {
@@ -633,6 +666,8 @@ func (n *Node) Step(event Event) []Action {
 		return n.logEntriesPersisted(event)
 	case CommitIndexPersisted:
 		return n.commitIndexPersisted(event)
+	case SnapshotPersisted:
+		return n.snapshotPersisted(event)
 	case RecoverCommitted:
 		return n.applyThrough(n.durableCommitIndex)
 	case SnapshotCompacted:
@@ -1081,35 +1116,56 @@ func (n *Node) handleInstallSnapshot(request InstallSnapshot) []Action {
 		n.readReady = false
 	}
 	n.recentLeaderContact = true
-	if request.Installed && request.SnapshotIndex > n.logBaseIndex {
-		first := 0
-		for first < len(n.log) && n.log[first].Index <= request.SnapshotIndex {
-			first++
+	if request.Success && request.Done && request.SnapshotIndex > n.logBaseIndex {
+		retainSuffix := request.SnapshotIndex <= n.lastLogIndex && n.termAt(request.SnapshotIndex) == request.SnapshotTerm
+		after := append([]Action{ResetElectionTimer{}}, n.persistSnapshot(request, retainSuffix)...)
+		if termChanged {
+			return n.persistHardState(after)
 		}
-		if request.SnapshotIndex <= n.lastLogIndex && n.termAt(request.SnapshotIndex) == request.SnapshotTerm {
-			n.log = cloneLogEntries(n.log[first:])
-		} else {
-			n.log = nil
-			n.lastLogIndex = request.SnapshotIndex
-			n.lastLogTerm = request.SnapshotTerm
-			n.durableLogIndex = request.SnapshotIndex
-		}
-		n.logBaseIndex = request.SnapshotIndex
-		n.logBaseTerm = request.SnapshotTerm
-		n.commitIndex = max(n.commitIndex, request.SnapshotIndex)
-		n.durableCommitIndex = max(n.durableCommitIndex, request.SnapshotIndex)
-		n.lastApplied = request.SnapshotIndex
-		if len(n.log) > 0 {
-			n.lastLogIndex = n.log[len(n.log)-1].Index
-			n.lastLogTerm = n.log[len(n.log)-1].Term
-			n.durableLogIndex = n.lastLogIndex
-		}
+		return after
 	}
-	after := append([]Action{ResetElectionTimer{}}, n.snapshotResponse(request, request.Success, request.NextOffset, request.Installed)...)
+	alreadyInstalled := request.Success && request.Done && request.SnapshotIndex <= n.logBaseIndex
+	after := append([]Action{ResetElectionTimer{}}, n.snapshotResponse(request, request.Success, request.NextOffset, alreadyInstalled)...)
 	if termChanged {
 		return n.persistHardState(after)
 	}
 	return after
+}
+
+func (n *Node) snapshotPersisted(event SnapshotPersisted) []Action {
+	pending, ok := n.pendingSnapshot[event.PersistenceID]
+	if !ok {
+		return nil
+	}
+	delete(n.pendingSnapshot, event.PersistenceID)
+	request := pending.request
+
+	first := 0
+	for first < len(n.log) && n.log[first].Index <= request.SnapshotIndex {
+		first++
+	}
+	if pending.retainSuffix {
+		n.log = cloneLogEntries(n.log[first:])
+	} else {
+		n.log = nil
+		n.lastLogIndex = request.SnapshotIndex
+		n.lastLogTerm = request.SnapshotTerm
+		n.durableLogIndex = request.SnapshotIndex
+	}
+	n.logBaseIndex = request.SnapshotIndex
+	n.logBaseTerm = request.SnapshotTerm
+	n.commitIndex = max(n.commitIndex, request.SnapshotIndex)
+	n.durableCommitIndex = max(n.durableCommitIndex, request.SnapshotIndex)
+	n.lastApplied = request.SnapshotIndex
+	if len(n.log) > 0 {
+		n.lastLogIndex = n.log[len(n.log)-1].Index
+		n.lastLogTerm = n.log[len(n.log)-1].Term
+		n.durableLogIndex = n.lastLogIndex
+	}
+	return append([]Action{RestoreSnapshot{
+		SnapshotIndex: request.SnapshotIndex,
+		SnapshotTerm:  request.SnapshotTerm,
+	}}, n.snapshotResponse(request, request.Success, request.NextOffset, true)...)
 }
 
 func (n *Node) snapshotResponse(request InstallSnapshot, success bool, nextOffset uint64, done bool) []Action {
@@ -1242,6 +1298,18 @@ func (n *Node) persistCommit(after []Action) []Action {
 		after:       after,
 	}
 	return []Action{PersistCommitIndex{PersistenceID: id, CommitIndex: n.commitIndex}}
+}
+
+func (n *Node) persistSnapshot(request InstallSnapshot, retainSuffix bool) []Action {
+	n.nextSnapshotPersistence++
+	id := n.nextSnapshotPersistence
+	n.pendingSnapshot[id] = pendingSnapshotPersistence{request: request, retainSuffix: retainSuffix}
+	return []Action{PersistSnapshot{
+		PersistenceID: id,
+		SnapshotIndex: request.SnapshotIndex,
+		SnapshotTerm:  request.SnapshotTerm,
+		RetainSuffix:  retainSuffix,
+	}}
 }
 
 func (n *Node) commitIndexPersisted(event CommitIndexPersisted) []Action {
