@@ -19,7 +19,7 @@ or benchmark-only storage mode. The benchmark uses the public `client.Client`
 API. Each concurrent worker owns one Client Session and serializes its SET
 sequences. GETs are linearizable API reads. The JSON report contains the
 command parameters, environment, workload duration, throughput, p50/p95/p99
-latencies, and latency samples in acquisition order. It is the raw result
+latencies, and latency samples in operation-ID order. It is the raw result
 format and can be reprocessed without rerunning the workload.
 
 ## Published measurement
@@ -35,14 +35,7 @@ commands:
 | SET | 932.4 ops/s | 8.04 ms | 10.98 ms | 18.66 ms |
 | GET | 1,281.7 ops/s | 6.00 ms | 7.31 ms | 14.98 ms |
 
-The published file is one run. A second run under identical conditions gave
-1,025.8 SET ops/s and 1,289.2 GET ops/s, so SET throughput and its tail vary
-noticeably between runs while GET is stable. Treat single-run tail latencies
-accordingly.
-
-These numbers replace an earlier measurement taken before `client.Client`
-reused connections, when every command paid TCP and HTTP/2 setup. Pooling
-raised SET throughput about 30% and GET about 25%.
+The published file records one run; treat its tail latencies accordingly.
 
 GET latency remains dominated by the Cluster, not the client. At eight
 concurrent workers the amortized cost is roughly 0.78 ms per read while p50 is

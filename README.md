@@ -30,7 +30,8 @@ quorumkvctl ──gRPC──> any Node ──Raft peer gRPC──> the other two
 
 ## 60-second demo
 
-Requirements: Docker and Docker Compose.
+Requirements: Docker, Docker Compose, and a POSIX shell with `sed`, `awk`, and
+standard Unix utilities. On Windows, use Git Bash or WSL.
 
 ```sh
 demo/run.sh
@@ -44,13 +45,20 @@ its volumes when it exits. The demo uses a tiny Snapshot threshold so the
 recovery path is visible quickly; normal configurations default to 64 MiB.
 
 For a manual local Cluster, copy `quorumkv.example.yaml` three times, keep the
-Cluster Identity and member map identical, and change `node.id` and
-`node.data_dir` in each copy. Start each with:
+Cluster Identity and member map identical, and change `node.id`,
+`node.data_dir`, and `node.metrics_address` in each copy. Use metrics ports
+`7501`, `7502`, and `7503` for Nodes 1, 2, and 3 respectively. Start the three
+Nodes in separate terminals:
 
 ```sh
 go run ./cmd/quorumkv -config node-1.yaml
 go run ./cmd/quorumkv -config node-2.yaml
 go run ./cmd/quorumkv -config node-3.yaml
+```
+
+Then use a fourth terminal for Client commands:
+
+```sh
 go run ./cmd/quorumkvctl -address 127.0.0.1:7401 status
 go run ./cmd/quorumkvctl -address 127.0.0.1:7401 session open
 go run ./cmd/quorumkvctl -address 127.0.0.1:7401 set <session-id> 1 greeting hello
@@ -71,7 +79,8 @@ partition, restart, repair, and Snapshot scenarios. CI runs formatting, the
 full Go suite, race detection, vet, static analysis, Protobuf validation, and
 Linux/Windows portable coverage. Durable Snapshot and WAL record decoders are
 fuzzed because both parse bytes from disk on the crash-recovery path. The
-public project makes no production-readiness claim.
+public project makes no production-readiness claim; its plaintext gRPC is
+intended only for trusted development networks.
 
 See [docs/architecture.md](docs/architecture.md) for consistency and crash
 guarantees, Quorum trade-offs, split-brain wording, linearizable versus
